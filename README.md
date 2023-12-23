@@ -82,6 +82,6 @@ The $`alpha_1`$ parameter controls the shape of the cosine blending schedule men
 
 Here is what various values of $`alpha_1`$ yield in the cosine blending schedule:
 
-~[The alpha_1 blending schedule](images/alpha_1_cosine_schedule.png)
+![The alpha_1 blending schedule](images/alpha_1_cosine_schedule.png)
 
 **Note**: I provide a `linear` blending option you can try to achieve a different result. There is no inherent reason why the blending schedule should be a cosine exponential. I think the paper's authors just thought it would be a good idea and perhaps their various PhD's in mathematics give them that liberty.
