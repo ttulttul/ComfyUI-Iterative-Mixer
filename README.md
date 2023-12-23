@@ -50,11 +50,12 @@ This node de-noises a latent image while mixing a bit of the noised latents in f
 
 I made up the term. In the [DemoFusion](https://arxiv.org/abs/2311.16973) paper, they use the term "skip residual" (see section 3.3):
 
-> For each generation phase $`s`$, we have already obtained a series of noise-inversed versions of $`( z_t^{s} )\`$ as $`( z_t^{'} )`$ with $`( t )`$ in $`( [1, T] )`$. During the denoising process, we introduce the corresponding noise-inversed versions as skip residuals. In other words, we modify $`( p_{\theta}(z_{t-1}|z_t) )`$ to $`( p_{\theta}(z_{t-1}|\hat{z_t}) )`$ with
+> For each generation phase $`s`$, we have already obtained a series of noise-inversed versions of $`( z_t^{s} )`$ as $`( z_t^{'} )`$ with $`( t )`$ in $`( [1, T] )`$. During the denoising process, we introduce the corresponding noise-inversed versions as skip residuals. In other words, we modify $`( p_{\theta}(z_{t-1}|z_t) )`$ to $`( p_{\theta}(z_{t-1}|\hat{z_t}) )`$ with
 
 > $$
 \hat{z_t}^{s} = c_1 \times z_t^{'s} + (1 - c_1) \times z_t^{s},
 $$
 
-> where $`( c_1 = \left(\frac{1 + \cos(\frac{2\pi t}{T})}{2}\right)^{\alpha_1} )`$ is a scaled cosine decay factor with a scaling factor $`( \alpha_1 )`$. This essentially utilizes the results from the previous phase to guide the generated image's global structure during the initial steps of the denoising process. Meanwhile, we gradually reduce the impact of the noise residual, allowing the local denoising paths to optimize the finer details more effectively in the later steps.
+> where $`( c_1 = \left(\frac{1 + \cos(\frac{\pi t}{T})}{2}\right)^{\alpha_1} )`$ is a scaled cosine decay factor with a scaling factor $`( \alpha_1 )`$. This essentially utilizes the results from the previous phase to guide the generated image's global structure during the initial steps of the denoising process. Meanwhile, we gradually reduce the impact of the noise residual, allowing the local denoising paths to optimize the finer details more effectively in the later steps.
 
+(Note: I correct the author by removing the 2 from the $`2{\pi}`$ that was originally in the numerator of the cosine expression in the paper's equation 4. The author acknowledged the mistake and will correct it in a future revision.)
