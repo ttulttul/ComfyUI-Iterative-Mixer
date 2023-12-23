@@ -75,3 +75,13 @@ These progressively noisier latents are then passed to the **Iterative Mixing KS
 By mixing in a portion of the noised 2x latent, we are helping the LDM model to generate a new image that is more consistent with the structure of the original image, but since the de-noising is indeed happening at the new resolution, the details should be filled in at full strength.
 
 The authors of the DemoFusion paper say that the output of the skip-residual process is grainy. I agree. But we can easily fix this in ComfyUI by bolting a KSampler onto the output with a low denoising level to clean things up. In the DemoFusion paper, they invent an elaborate sliding window algorithm that they call "dilated sampling" to incorporate local and global context during de-noising. However, testing of their algorithm suggests that we may be better off just doing a bit more sampling at a light de-noising level and introducing other concepts like ControlNet to constrain the generate of extra limbs and whatnot. **Your mileage may vary**.
+
+## What the hell is $`alpha_1`$?
+
+The $`alpha_1`$ parameter controls the shape of the cosine blending schedule mentioned in the math above from the DemoFusion paper. The value of $`alpha_1`$ is supposed to be low during the early part of the de-noising process to encourage the model to take lots of hints from the noised 2x latent batch. Later, we want the model to be guided less by the noised latent batch because otherwise we'd end up just copying it - including artifacts of the rough 2x upscaling that we did using bicubic interpolation or whatever other simple interpolation algorithm. In other words, we want the model to have more creative freedom as more of the image comes into focus.
+
+Here is what various values of $`alpha_1`$ yield in the cosine blending schedule:
+
+~[The alpha_1 blending schedule](images/alpha_1_cosine_schedule.png)
+
+**Note**: I provide a `linear` blending option you can try to achieve a different result. There is no inherent reason why the blending schedule should be a cosine exponential. I think the paper's authors just thought it would be a good idea and perhaps their various PhD's in mathematics give them that liberty.
