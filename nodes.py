@@ -298,7 +298,8 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
         # z_hat[i] = denoise(z[i-1]) * (1 - c1[i]) + z_prime[i-1] * c1
 
         c1_i = c1[zp_idx]
-        z_i = c1_i * z_prime_i + (1 - c1_i) * samples_i
+        z_i = (1 - c1_i) * z_prime_i + c1_i * samples_i
+        logger.warning(f"c1_i = {c1_i}")
 
         z_out[out_i] = z_i
         out_i += 1
