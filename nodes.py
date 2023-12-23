@@ -4,7 +4,6 @@ import comfy.model_management
 import comfy.sample
 import comfy.utils
 import comfy.samplers
-import logging as logger
 
 BLENDING_SCHEDULES = ["cosine", "linear"]
 
@@ -129,8 +128,6 @@ def get_cosine_blending_schedule(indices, alpha_1):
     steps = indices[-1] + 1
     t = torch.tensor(indices)
 
-    logger.warning(f"get_blending_schedule: steps={steps}, t.shape={t.shape}")
-
     # Calculate c1 using the code borrowed from the author's repository.
     cosine_factor = 0.5 * (1 + torch.cos(torch.pi * (steps - t) / steps))
 
@@ -241,11 +238,8 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
     pbar = comfy.utils.ProgressBar(steps)
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
 
-    logger.warning(f"zp_indices={zp_indices}, c1={c1}")
-
     for zp_idx, i in enumerate(zp_indices):
         out_i = zp_idx + 1
-        logger.warning(f"zp_idx={zp_idx}, out_i={out_i}, i={i}")
         
         # Grab the i-th z_prime and i-th noise tensor from their batches.
         # Unsqueezing replaces the batch dimension with 1, so it transforms
@@ -299,7 +293,6 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
 
         c1_i = c1[zp_idx]
         z_i = (1 - c1_i) * z_prime_i + c1_i * samples_i
-        logger.warning(f"c1_i = {c1_i}")
 
         z_out[out_i] = z_i
         out_i += 1
@@ -361,7 +354,6 @@ class IterativeMixingKSamplerAdv:
     def sample(self, model, seed, cfg, sampler_name, scheduler, positive, negative,
                latent_image_batch, denoise=1.0, alpha_1=0.1, reverse_input_batch=True,
                blending_schedule=get_cosine_blending_schedule):
-        logger.warning(f"IterativeMixingKSamplerAdv: z_primes['samples'].shape={latent_image_batch['samples'].shape}")
         return iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
                                          latent_image_batch, denoise=denoise, alpha_1=alpha_1, reverse_input_batch=True,
                                          blending_schedule=blending_schedule)
@@ -381,16 +373,13 @@ class IterativeMixingKSamplerSimple:
                     "negative": ("CONDITIONING", ),
                     "latent_image": ("LATENT", ),
                     "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                    "steps": ("INT", {"default": 10000, "min": 0, "max": 10000}),
+                    "steps": ("INT", {"default": 40, "min": 0, "max": 10000}),
                     "cfg": ("FLOAT", {"default": 8.0, "min": 0.0,
                                       "max": 100.0, "step":0.1, "round": 0.01}),
                     "sampler_name": (comfy.samplers.KSampler.SAMPLERS, ),
                     "scheduler": (comfy.samplers.KSampler.SCHEDULERS, ),
                     "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                     "alpha_1": ("FLOAT", {"default": 0.1, "min": 0.05, "max": 100.0, "step": 0.05}),
-
-                    "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
-                    "end_at_step": ("INT", {"default": 10000, "min": 1, "max": 10000}),
 
                     "blending_schedule": (BLENDING_SCHEDULES, {"default": "cosine"})
                      }
@@ -407,13 +396,11 @@ class IterativeMixingKSamplerSimple:
     def sample(self, model, positive, negative, latent_image,
                seed, steps, cfg, sampler_name, scheduler,
                denoise, alpha_1,
-               start_at_step, end_at_step,
                blending_schedule):
         (z_primes,) = self.batch_unsampler.unsampler(model, sampler_name,
                                                  scheduler, steps,
-                                                 start_at_step, end_at_step,
+                                                 0, steps,
                                                  latent_image)
-        logger.warning(f"IterativeMixingKSamplerSimple: z_primes['samples'].shape={z_primes['samples'].shape}")
         (z_out, _, _) = iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
                                                   z_primes, denoise=denoise, alpha_1=alpha_1, reverse_input_batch=True,
                                                   blending_schedule=blending_schedule)
