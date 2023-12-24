@@ -20,16 +20,24 @@ This node de-noises a latent image while mixing a bit of a noised sequence of la
 - **alpha_1**: a parameter to specify how latents are mixed; try values between 0.1 and 2.0
 - **reverse_input_batch**: should always be True because the Batch Unsampler produces latents in the wrong order
 - **blending_schedule**: choose between cosine and linear to get a different effect; alpha_1 is ignored with linear
+- **stop_blending_at_pct**: select a float between 0.0 and 1.0 to stop blending at this fraction of steps for a noisier result
+
+**Note**: For even more fun, try setting `stop_blending_at_pct` to a value great than 1.0, which stretches the cosine blending
+schedule beyond the usual step range. This will have the effect of blending some share of the noised latents $`z^{'}`$ all the way
+through the entire de-noising process, leading to interesting results.
 
 ### Batch Unsampler:
 This node takes a latent image as input, adding noise to it in the manner described in the original [Latent Diffusion Paper](https://arxiv.org/abs/2112.10752).
 - **model**: a diffusion model
-- **latent_image**: the latent that you want to unsample into a series of progressively noisier latents
 - **sampler_name**: the sampler that will give us the correct sigmas for the model
 - **scheduler**: the scheduler that will give us the correct sigmas for the model
 - **steps**: the number of steps of noising; the latent will be noised all the way across this many steps
 - **start_at_step**: if you want to start part way (untested)
 - ***end_at_step**: if you want to end part way (untested)
+- **latent_image**: the latent that you want to unsample into a series of progressively noisier latents
+- **normalize_fraction**: normalize the entire unsampled batch based on the mean of this share of the last latents in the batch
+
+**Note**: The `normalize_fraction` amount is highly experimental and unscientific. It serves to remove any bias in the final noised latent in the batch so that sampling from that noise will have the maximum possible dynamic range.
 
 ### Iterative Mixing KSampler Advanced:
 This node de-noises a latent image while mixing a bit of the noised latents in from the Batch Unsampler at each step. Note that the number of steps is inferred from the size of the input latent batch from the Batch Unsampler, which is why this parameter is missing.

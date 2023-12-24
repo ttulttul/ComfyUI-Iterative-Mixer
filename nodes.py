@@ -4,6 +4,9 @@ import comfy.model_management
 import comfy.sample
 import comfy.utils
 import comfy.samplers
+import logging as logger
+from PIL import Image
+import numpy as np
 
 BLENDING_SCHEDULES = ["cosine", "linear"]
 
@@ -23,7 +26,7 @@ def calc_sigmas(model, sampler_name, scheduler, steps, start_at_step, end_at_ste
         
         return sigmas
 
-def generate_noised_latents(x, sigmas):
+def generate_noised_latents(x, sigmas, normalize=False):
     """
     Generate all noised latents for a given initial latent image and sigmas in parallel.
 
@@ -49,8 +52,113 @@ def generate_noised_latents(x, sigmas):
     # Multiply noise by sigmas, reshaped for broadcasting
     noised_latents = x_expanded + noise * sigmas_expanded.view(-1, 1, 1, 1)
 
+    # Unscientifically normalize the batch based on the mean and std of the first
+    # latent in the batch (i.e. the original latent image).
+    # Normalization may help align the noised sequence so that it has similar
+    # statistics to the image that is being noised.
+    if normalize:
+        B, _, _, _ = noised_latents.shape
+        source_mean = noised_latents[0].mean()
+        source_std = noised_latents[0].std()
+        logger.warning(f"normalizing noised latents by mean={source_mean} std={source_std}")
+        noised_latents = (noised_latents - source_mean) / source_std
+
     return noised_latents
 
+def pil2tensor(image: Image.Image) -> torch.Tensor:
+    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
+class LatentBatchStatisticsPlot:
+    """
+    Generate a plot of the statistics of a batch of latents for analysis.
+    Outputs an image.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "batch": ("LATENT",)
+                }}
+    
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("plot_image",)
+    FUNCTION = "statistics"
+
+    CATEGORY = "tests"
+
+    def statistics(self, batch):
+        """
+        Run a statistical test on each latent in a batch to see how
+        close to normal each latent is.
+        """
+
+        from scipy import stats
+        import matplotlib.pyplot as plt
+        import io
+
+        batch = batch["samples"]
+        batch_size = batch.shape[0]
+        p_values = []
+        means = []
+        std_devs = []
+
+        for i in range(batch.shape[0]):
+            # Flatten the tensor
+            tensor_1d = batch[i].flatten()
+
+            # Convert to NumPy array
+            numpy_array = tensor_1d.numpy()
+
+            # Perform Shapiro-Wilk test
+            _, p = stats.shapiro(numpy_array)
+
+            # Store the statistics for this latent
+            p_values.append(p)
+            means.append(numpy_array.mean())
+            std_devs.append(numpy_array.std())
+        
+        # Assuming 'p_values' is the array of p-values
+        # Create a figure with subplots
+        fig, axs = plt.subplots(3, 1, figsize=(10, 15))
+
+        # Shapiro-Wilk test results
+        axs[0].plot(p_values, label="p-values", marker='o', linestyle='-')
+        axs[0].set_title('Shapiro-Wilk Test P-Values')
+        axs[0].set_xlabel('Batch Number')
+        axs[0].set_ylabel('P-Value')
+        axs[0].axhline(y=0.05, color='r', linestyle='--', label='Normal Threshold')
+        axs[0].legend()
+
+        # Mean
+        axs[1].plot(means, marker='o', linestyle='-')
+        axs[1].set_title('Mean of Each Batch Latent')
+        axs[1].set_xlabel('Batch Number')
+        axs[1].set_ylabel('Mean')
+
+        # Standard Deviation
+        axs[2].plot(std_devs, marker='o', linestyle='-')
+        axs[2].set_title('Standard Deviation of Each Batch Latent')
+        axs[2].set_xlabel('Batch Number')
+        axs[2].set_ylabel('Standard Deviation')
+
+        # Adjust layout
+        plt.tight_layout()
+
+        # Save the plot to a BytesIO object
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+
+        # Create a PIL image from the buffer and move channels to the end.
+        pil_image = Image.open(buf)
+        image_tensor = pil2tensor(pil_image)
+
+        # Make this into a batch of one as required by Comfy.
+        batch_output = image_tensor.unsqueeze(0)
+
+        # Add a single batch dimension and we're done.
+        # The channel dimension has to go on the end.
+        return batch_output
 
 class BatchUnsampler:
     """
@@ -66,6 +174,7 @@ class BatchUnsampler:
                     "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
                     "end_at_step": ("INT", {"default": 10000, "min": 1, "max": 10000}),
                     "latent_image": ("LATENT", ),
+                    "normalize": ("BOOLEAN", {"default": False})
                 }}
     
     RETURN_TYPES = ("LATENT",)
@@ -73,9 +182,10 @@ class BatchUnsampler:
     FUNCTION = "unsampler"
 
     CATEGORY = "tests"
-    
+
+
     def unsampler(self, model, sampler_name, scheduler, steps,
-                  start_at_step, end_at_step, latent_image):
+                  start_at_step, end_at_step, latent_image, normalize=False):
         """
         Generate a batch of latents representing each z[i] in the
         progressively noised sequence of latents stemming from the
@@ -99,13 +209,13 @@ class BatchUnsampler:
 
         # Generate a batch of progressively noised latents according
         # to the reversed sigmas (noise schedule).
-        z = generate_noised_latents(latent_image, sigmas)
+        z = generate_noised_latents(latent_image, sigmas, normalize=normalize)
 
         # Return the batch of progressively noised latents.
         out = {"samples": z}
         return (out,)
 
-def get_linear_blending_schedule(indices, _):
+def get_linear_blending_schedule(indices, _, stop_blending_at_step=None):
     """
     Define a linear tensor from 0 to 1 across the given indices.
     Yes this could just be a one-liner, but I'm putting it in a
@@ -113,40 +223,66 @@ def get_linear_blending_schedule(indices, _):
     schedule to see what differs in the output.
     """
     steps = indices[-1] + 1
+
+    if stop_blending_at_step is not None:
+        if stop_blending_at_step > steps:
+            logger.warning("setting stop_blending_at to an index greater than step count produces weird results:")
+        logger.warning("setting stop_blending_at to %s out of %s steps" % (stop_blending_at_step, steps))
+        steps = stop_blending_at_step
+    
     t = torch.tensor(indices)
     linear_schedule = t / steps
+
+    linear_schedule = torch.where(t > steps, torch.tensor(1.0), linear_schedule)
+    
     return linear_schedule
 
-def get_cosine_blending_schedule(indices, alpha_1):
+def get_cosine_blending_schedule(indices, alpha_1, stop_blending_at_step=None):
     """
     Define a tensor representing the constant c1 from the DemoFusion paper.
     I have found that values between 0.1 and 1.0 deliver reasonable results.
     If you go above 1.0 things get noisy.
+    If you set stop_blending_at_step to a step count, then blending will be adjusted
+    in the t-axis so that it finishes at that step; thereafter c1 will equal 1.0.
     """
-    # The final item in indices is the last index of a latent batch.
-    # We add one to this to get the number of steps.
     steps = indices[-1] + 1
+    if stop_blending_at_step is not None:
+        if stop_blending_at_step > steps:
+            logger.warning("setting stop_blending_at to an index greater than step count produces weird results:")
+        logger.warning("setting stop_blending_at to %s out of %s steps" % (stop_blending_at_step, steps))
+        steps = stop_blending_at_step
+    
     t = torch.tensor(indices)
 
-    # Calculate c1 using the code borrowed from the author's repository.
+    # Calculate cosine_factor with adjusted step size
     cosine_factor = 0.5 * (1 + torch.cos(torch.pi * (steps - t) / steps))
 
+    # Apply the alpha exponentiation
     c1 = cosine_factor ** alpha_1
+
+    # If you set stop_blending_at_step, then we have to clamp
+    # the remaining values to 1.0. This line has no effect if
+    # we are blending out to the full number of steps in the indices
+    # parameter.
+    c1 = torch.where(t > steps, torch.tensor(1.0), c1)
+
     return c1
+
 
 BLENDING_SCHEDULE_MAP={"cosine": get_cosine_blending_schedule,
                        "linear": get_linear_blending_schedule}
 
-def get_blending_schedule(indices: list[int], alpha_1: float, blending_schedule):
+def get_blending_schedule(indices: list[int], alpha_1: float, blending_schedule, **kwargs):
     if blending_schedule not in BLENDING_SCHEDULE_MAP:
         raise Exception("invalid blending_schedule %s" % blending_schedule)
-    return BLENDING_SCHEDULE_MAP[blending_schedule](indices, alpha_1)
+    return BLENDING_SCHEDULE_MAP[blending_schedule](indices, alpha_1, **kwargs)
 
 
 def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
                               latent_image_batch, denoise=1.0, disable_noise=False,
                               force_full_denoise=False, c1=None, alpha_1=0.5, reverse_input_batch=True,
-                              blending_schedule=get_cosine_blending_schedule):
+                              blending_schedule=get_cosine_blending_schedule,
+                              stop_blending_at_pct=1.0):
     # I originally had a step_increment argument but there is no purpose
     # to it, because you can just set the step count and of course
     # the sigmas and everything will adjust accordingly.
@@ -215,9 +351,19 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
     # is z_primes[0] unsqueezed to remove the batch dimension.
     z_i = z_primes[0].unsqueeze(0)
 
+    # If desired, stop blending at a certain fraction of steps by
+    # setting the last few values of c1 to 1.0, which will cause
+    # 0% of the z_prime latents to be mixed at each following step.
+    # This setting can help to reduce the noisiness of the output at
+    # the expense of reducing guidance slightly.
+    stop_blending_at_step = steps
+    stop_blending_at_step = int(steps * stop_blending_at_pct)
+    logger.warning(f"stop_blending_at: {stop_blending_at_step}")
+
     # Get the blending parameter from the DemoFusion paper.
     if c1 is None:
-        c1 = get_blending_schedule(zp_indices, alpha_1, blending_schedule)
+        c1 = get_blending_schedule(zp_indices, alpha_1, blending_schedule, stop_blending_at_step=stop_blending_at_step)
+        logger.warning('c1=[%s]' % (', '.join(f'{value:.3f}' for value in c1)))
 
     # Move the blending schedule tensor to the same device as our
     # latents.
@@ -295,7 +441,6 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
         z_i = (1 - c1_i) * z_prime_i + c1_i * samples_i
 
         z_out[out_i] = z_i
-        out_i += 1
 
     out = latent_image_batch.copy()
     out["samples"] = z_out
@@ -342,7 +487,8 @@ class IterativeMixingKSamplerAdv:
                     "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                     "alpha_1": ("FLOAT", {"default": 0.1, "min": 0.05, "max": 100.0, "step": 0.05}),
                     "reverse_input_batch": ("BOOLEAN", {"default": True}),
-                    "blending_schedule": (BLENDING_SCHEDULES, {"default": "cosine"})
+                    "blending_schedule": (BLENDING_SCHEDULES, {"default": "cosine"}),
+                    "stop_blending_at_pct": ("FLOAT", {"default": 1.0})
                     }
                 }
 
@@ -353,10 +499,12 @@ class IterativeMixingKSamplerAdv:
 
     def sample(self, model, seed, cfg, sampler_name, scheduler, positive, negative,
                latent_image_batch, denoise=1.0, alpha_1=0.1, reverse_input_batch=True,
-               blending_schedule=get_cosine_blending_schedule):
+               blending_schedule=get_cosine_blending_schedule,
+               stop_blending_at_pct=1.0):
         return iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
                                          latent_image_batch, denoise=denoise, alpha_1=alpha_1, reverse_input_batch=True,
-                                         blending_schedule=blending_schedule)
+                                         blending_schedule=blending_schedule,
+                                         stop_blending_at_pct=stop_blending_at_pct)
 
 class IterativeMixingKSamplerSimple:
     """
@@ -381,7 +529,8 @@ class IterativeMixingKSamplerSimple:
                     "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                     "alpha_1": ("FLOAT", {"default": 0.1, "min": 0.05, "max": 100.0, "step": 0.05}),
 
-                    "blending_schedule": (BLENDING_SCHEDULES, {"default": "cosine"})
+                    "blending_schedule": (BLENDING_SCHEDULES, {"default": "cosine"}),
+                    "stop_blending_at_pct": ("FLOAT", {"default": 1.0})
                      }
                 }
 
@@ -396,14 +545,16 @@ class IterativeMixingKSamplerSimple:
     def sample(self, model, positive, negative, latent_image,
                seed, steps, cfg, sampler_name, scheduler,
                denoise, alpha_1,
-               blending_schedule):
+               blending_schedule,
+               stop_blending_at_pct):
         (z_primes,) = self.batch_unsampler.unsampler(model, sampler_name,
                                                  scheduler, steps,
                                                  0, steps,
                                                  latent_image)
         (z_out, _, _) = iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
                                                   z_primes, denoise=denoise, alpha_1=alpha_1, reverse_input_batch=True,
-                                                  blending_schedule=blending_schedule)
+                                                  blending_schedule=blending_schedule,
+                                                  stop_blending_at_pct=stop_blending_at_pct)
 
         # Return just the final z_out (as a 4D tensor)
         return ({"samples": z_out["samples"][-1:]},)
@@ -412,6 +563,7 @@ class IterativeMixingKSamplerSimple:
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
     "Batch Unsampler": BatchUnsampler,
+    "Latent Batch Statistics Plot": LatentBatchStatisticsPlot,
     "Iterative Mixing KSampler Advanced": IterativeMixingKSamplerAdv,
     "Iterative Mixing KSampler": IterativeMixingKSamplerSimple
 }
@@ -419,6 +571,7 @@ NODE_CLASS_MAPPINGS = {
 # A dictionary that contains the friendly/humanly readable titles for the nodes
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Batch Unsampler": "Batch Unsampler",
+    "Latent Batch Statistics Plot": "Latent Batch Statistics Plot",
     "Iterative Mixing KSampler Advanced": "Iterative Mixing KSampler Advanced",
     "Iterative Mixing KSampler": "Iterative Mixing KSampler"
 }
