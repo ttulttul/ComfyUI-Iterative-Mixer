@@ -54,6 +54,52 @@ This node de-noises a latent image while mixing a bit of the noised latents in f
 - **reverse_input_batch**: should always be True because the Batch Unsampler produces latents in the wrong order
 - **blending_schedule**: choose between cosine and linear to get a different effect; alpha_1 is ignored with linear
 
+## How the hell does this work?
+
+Whenever we upscale an image, we are taking a relatively small amount of information and making it cover a larger spatial area. Given a 64x64 latent image (this is the size of latent that Stable Diffusion 1.5 VAEs generate), upscaling to 128x128 implies that each of the original latent pixels has to do 4x the work.
+
+Here is a walk-through of how upscaling happens using this node pack.
+
+Example: We start with a 768x512px image generated from an SD1.5 model. Since this image was generated at a resolution that is close to the resolution of images the model was trained on (SD1.5 was trained at 512x512), the model can generate a coherent scene that properly attends to all the pixels no matter how far apart they are, ensuring we don't get extra limbs and weirdness:
+![Original 786x512px SD1.5 Image (from latent)](images/example-512px.png)
+
+Then, we upscale it by 2x using the wonderfully fast [NNLatentUpscale](https://github.com/Ttl/ComfyUi_NNLatentUpscale) model, which uses a small neural network to upscale the latents as they would be upscaled if they had been converted to pixel space and back. This results in a pretty clean but somewhat fuzzy 2x image:
+![Roughly 2x upscaled 1536x1024px SD1.5 Image (from latent)](images/example-rough-1024px.png)
+
+Notice how the upscale is larger, but it's fuzzy and lacking in detail. The fuzziness occurs because upscaling the latents cannot make up for the lost information between the pixels. We need to fix this problem somehow. We could use an upscaling model, which has been trained on thousands of high and low resolution images of all kinds to "fill in the gaps," but that would be so boring...
+
+So instead, we use the Batch Unsampler node from this node pack to generate a sequence of progressively noisier latents. The noise is added to the latents using the same noise schedule as the underlying SD model. This is the noise schedule that was used during training of the model and it does not rely on conditioning, which is why the Batch Unsampler node does not ask for positive or negative conditioning inputs:
+
+![Result of applying the Batch Unsampler node to generate 21 progressively noised latents](images/example-noised-sequence-1024px.png)
+
+We pass the progressively-noised sequence along with the fuzzy 2x-upscaled latent into the Iterative Mixing KSampler Advanced node. The Iterative Mixing KSampler then runs the diffusion sampler step by step, mixing in a bit of the noised sequence latents at each time step. The fraction of the noised latents that is mixed in declines as the steps progress, in accordance with a blending schedule. By default, the blending schedule is a cosine-exponential curve that starts off giving lots of input from the noised sequence, decaying to almost nothing by the end. You can also choose a linear schedule or a logistic curve schedule. Play around with the choise of blending schedule to get different results. There is no hard and fast rule as to which schedule is the best.
+
+After iterative mixing sampling, we get a new 1536x1024px image:
+
+![Result of de-noising the rough 2x upscale using the Iterative Mixing KSampler Advanced node](images/example-denoised-sequence-1024px)
+
+This image is richer detail than the original fuzzy image we passed in (as a latent) before iterative mixing, but it also has some residual noise that shows up as graininess. The graininess results because the stable diffusion model was never trained to operate in this manner and is unable to eliminate all of the noise that was mixed in step by step by the iterative mixing sampler:
+
+![Final result from iterative mixing sampler](images/example-final-denoised-1024px.png)
+
+Fortunately, getting rid of the noise is really easy. To clean up the noise, we simply pass it through another KSampler at a very low denoising strength. This final "clean up" should be run at the lowest possible denoising strength to avoid removing details and generating artifacts.
+
+## Tips for getting good results
+
+Here are some things to try to get good results. By default, as mentioned above, the iterative mixing sampler will generate grainy output. Cleaning up the grainy output can be accomplished by a second sampler at a low denoise strength of 0.05 - 0.25. General tips:
+
+1. Play with the de-noising strength in the Iterative Mixing KSampler node. Using a de-noising strength of 1.0 will generate the grainiest output, but the output will have a very high level of detail when refined. Using a lower de-noising strength will generate less noise at the output, but won't require as much refinement. Generally speaking, _if you use a low de-noise in the iterative mixer, then you will need a lower de-noise in the refinement sampler_.
+
+2. Try starting with 20 to 40 steps of iterative mixing. You can use fewer steps to get "interesting" output, but it's possible that the amount of noise will be so high as to skew your generation quite far from the coherent output you desire.
+
+3. Scale by no more than 2x at a time. If you are seeking a 4x output, use two phases of upscaling and iterative mixing. I have found that scaling up by more than 2x can result in coherence issues like extra limbs and whatnot.
+
+4. Try using `ControlNet` nodes. Apply a depth or open pose ControlNet based on the initial low resolution image and send that conditioning into the iterative mixing sampler. This will guide the sampling process more carefully along the lines of the structure that you care about. If you are having problems with too many fingers or extra arms, a pose ControlNet will help. The depth ControlNet can help to ensure the structure of a room remains consistent.
+
+5. Try using `IPAdapter` nodes. Similar to ControlNet, IPAdapter allows you to condition the model based on the semantic information in a source image. Feed your 512px image into an IPAdapter and use this to modify your model before inputting into the iterative mixing sampler. You may find this improves the iterative mixing output by better aliging it to the precise composition of the low resolution image.
+
+6. Try using `PatchModelAndDownscale` to adjust your model for the upscale sampling passes. This relatively new node (as of December 2023) implements the Kohya "DeepShrink" concept, downscaling one of the layers of the SD model U-Net for a few steps to increase the "receptive field" of the model, which is appropriate when you are generating images at a resolution that is higher than the resolution the model was trained at. For each upscale level (2x, 4x, etc.), I suggest setting the `downscale_factor` to the same amount. In other words, downscale by 2x for the first pass and 4x for the second pass if you are doing a 4x upscale through two iterative mixing samplers.
+
 ## What does "Iterative Mixing" mean?
 
 I made up the term "Iterative Mixing." Sorry. In the [DemoFusion](https://arxiv.org/abs/2311.16973) paper, they use the term "skip residual" (see section 3.3), but I just don't like that term (**emphasis** below is mine):
