@@ -1,5 +1,5 @@
-import math
 import torch
+from typing import Dict, Callable
 import comfy.model_management
 import comfy.sample
 import comfy.utils
@@ -8,7 +8,7 @@ import logging as logger
 from PIL import Image
 import numpy as np
 
-BLENDING_SCHEDULES = ["cosine", "linear"]
+BLENDING_SCHEDULES = ["cosine", "linear", "logistic"]
 
 def calc_sigmas(model, sampler_name, scheduler, steps, start_at_step, end_at_step):
         """
@@ -237,7 +237,7 @@ def get_linear_blending_schedule(indices, _, stop_blending_at_step=None):
     
     return linear_schedule
 
-def get_cosine_blending_schedule(indices, alpha_1, stop_blending_at_step=None):
+def get_cosine_blending_schedule(indices, alpha_1=2.0, start_blending_at_step=0, stop_blending_at_step=None):
     """
     Define a tensor representing the constant c1 from the DemoFusion paper.
     I have found that values between 0.1 and 1.0 deliver reasonable results.
@@ -268,20 +268,67 @@ def get_cosine_blending_schedule(indices, alpha_1, stop_blending_at_step=None):
 
     return c1
 
+def get_logistic_blending_schedule(indices: list[int],
+                                   alpha_1: float=2.0, #ignored, but maybe I'll map to steepness one day
+                                   start_blending_at_step: int=0,
+                                   stop_blending_at_step: int=None) -> torch.Tensor:
+    """
+    Generate a logistic function ranging between x=[0,1] given step
+    indices that range between any two extreems. The logistic will be guaranteed
+    to hit x=1 at the max step value in the indices.
 
-BLENDING_SCHEDULE_MAP={"cosine": get_cosine_blending_schedule,
-                       "linear": get_linear_blending_schedule}
+    Parameters:
+    tensor (torch.Tensor): 1D tensor of x-coordinates.
+    steepness (float): Steepness of the logistic curve.
+    midpoint (float): x-value of the sigmoid's midpoint.
+    clamp_below (float): x-value below which the curve will clamp to 0.0.
+    clamp_above (float): x-value above which the curve will clamp to 1.0.
 
-def get_blending_schedule(indices: list[int], alpha_1: float, blending_schedule, **kwargs):
+    Returns:
+    torch.Tensor: Output of the logistic function.
+    """
+    indices = torch.tensor(indices)
+    max_step = torch.max(indices)
+    steepness = alpha_1 * 5 # arbitrary
+
+    if max_step == 0:
+        raise Exception("the maximum blending step cannot be zero")
+    
+    midpoint = (((stop_blending_at_step or max_step) + (start_blending_at_step)) / 2) / max_step
+
+    # Adjust the step indices such that the curve ranges over x from 0.0 to 1.0.
+    indices = indices.float() / max_step
+
+    # Apply the logistic function
+    logistic_output = 1 / (1 + torch.exp(-steepness * (indices - midpoint)))
+
+    # Clamp the output to 1.0 for x-values above the specified threshold
+    if stop_blending_at_step is not None:
+        x = stop_blending_at_step / max_step
+        logistic_output = torch.where(indices > x, torch.tensor(1.0), logistic_output)
+
+    if start_blending_at_step is not None:
+        x = start_blending_at_step / max_step
+        logistic_output = torch.where(indices < x, torch.tensor(0.0), logistic_output)
+
+    return logistic_output
+
+BLENDING_SCHEDULE_MAP: Dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
+    "cosine": get_cosine_blending_schedule,
+    "linear": get_linear_blending_schedule,
+    "logistic": get_logistic_blending_schedule
+}
+
+def get_blending_schedule(indices: list[int], blending_schedule: dict, **kwargs):
     if blending_schedule not in BLENDING_SCHEDULE_MAP:
         raise Exception("invalid blending_schedule %s" % blending_schedule)
-    return BLENDING_SCHEDULE_MAP[blending_schedule](indices, alpha_1, **kwargs)
-
+    return BLENDING_SCHEDULE_MAP[blending_schedule](indices, **kwargs)
 
 def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
                               latent_image_batch, denoise=1.0, disable_noise=False,
                               force_full_denoise=False, c1=None, alpha_1=0.5, reverse_input_batch=True,
                               blending_schedule=get_cosine_blending_schedule,
+                              start_blending_at_pct=0.0,
                               stop_blending_at_pct=1.0):
     # I originally had a step_increment argument but there is no purpose
     # to it, because you can just set the step count and of course
@@ -351,18 +398,25 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
     # is z_primes[0] unsqueezed to remove the batch dimension.
     z_i = z_primes[0].unsqueeze(0)
 
+
+    # If desired, start blending at a certain step count by setting
+    # the blending curve to 0.0
+    start_blending_at_step = int(steps * start_blending_at_pct)
+    logger.warning(f"start_blending_at: {start_blending_at_step}")
+
     # If desired, stop blending at a certain fraction of steps by
     # setting the last few values of c1 to 1.0, which will cause
     # 0% of the z_prime latents to be mixed at each following step.
     # This setting can help to reduce the noisiness of the output at
     # the expense of reducing guidance slightly.
-    stop_blending_at_step = steps
     stop_blending_at_step = int(steps * stop_blending_at_pct)
     logger.warning(f"stop_blending_at: {stop_blending_at_step}")
 
     # Get the blending parameter from the DemoFusion paper.
     if c1 is None:
-        c1 = get_blending_schedule(zp_indices, alpha_1, blending_schedule, stop_blending_at_step=stop_blending_at_step)
+        c1 = get_blending_schedule(zp_indices, blending_schedule, alpha_1=alpha_1,
+                                   start_blending_at_step=start_blending_at_step,
+                                   stop_blending_at_step=stop_blending_at_step)
         logger.warning('c1=[%s]' % (', '.join(f'{value:.3f}' for value in c1)))
 
     # Move the blending schedule tensor to the same device as our
