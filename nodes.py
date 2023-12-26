@@ -215,7 +215,8 @@ class BatchUnsampler:
         out = {"samples": z}
         return (out,)
 
-def get_linear_blending_schedule(indices, _, stop_blending_at_step=None, alpha_1=None):
+def get_linear_blending_schedule(indices, stop_blending_at_step=None,
+                                 alpha_1=None, start_blending_at_step=0):
     """
     Define a linear tensor from 0 to 1 across the given indices.
     Yes this could just be a one-liner, but I'm putting it in a
@@ -227,13 +228,13 @@ def get_linear_blending_schedule(indices, _, stop_blending_at_step=None, alpha_1
     if stop_blending_at_step is not None:
         if stop_blending_at_step > steps:
             logger.warning("setting stop_blending_at to an index greater than step count produces weird results:")
-        logger.warning("setting stop_blending_at to %s out of %s steps" % (stop_blending_at_step, steps))
-        steps = stop_blending_at_step
-    
+        steps = stop_blending_at_step        
+
     t = torch.tensor(indices)
     linear_schedule = t / steps
 
-    linear_schedule = torch.where(t > steps, torch.tensor(1.0), linear_schedule)
+    linear_schedule = torch.where(t > steps,                  torch.tensor(1.0), linear_schedule)
+    linear_schedule = torch.where(t < start_blending_at_step, torch.tensor(0.0), linear_schedule)
     
     return linear_schedule
 
