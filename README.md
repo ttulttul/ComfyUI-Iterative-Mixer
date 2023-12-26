@@ -70,13 +70,13 @@ Notice how the upscale is larger, but it's fuzzy and lacking in detail. The fuzz
 
 So instead, we use the Batch Unsampler node from this node pack to generate a sequence of progressively noisier latents. The noise is added to the latents using the same noise schedule as the underlying SD model. This is the noise schedule that was used during training of the model and it does not rely on conditioning, which is why the Batch Unsampler node does not ask for positive or negative conditioning inputs:
 
-![Result of applying the Batch Unsampler node to generate 21 progressively noised latents](images/example-noised-sequence-1024px)
+![Result of applying the Batch Unsampler node to generate 21 progressively noised latents](images/example-noised-sequence-1024px.png)
 
 We pass the progressively-noised sequence along with the fuzzy 2x-upscaled latent into the Iterative Mixing KSampler Advanced node. The Iterative Mixing KSampler then runs the diffusion sampler step by step, mixing in a bit of the noised sequence latents at each time step. The fraction of the noised latents that is mixed in declines as the steps progress, in accordance with a blending schedule. By default, the blending schedule is a cosine-exponential curve that starts off giving lots of input from the noised sequence, decaying to almost nothing by the end. You can also choose a linear schedule or a logistic curve schedule. Play around with the choise of blending schedule to get different results. There is no hard and fast rule as to which schedule is the best.
 
 After iterative mixing sampling, we get a new 1536x1024px image:
 
-![Result of de-noising the rough 2x upscale using the Iterative Mixing KSampler Advanced node](images/example-denoised-sequence-1024px)
+![Result of de-noising the rough 2x upscale using the Iterative Mixing KSampler Advanced node](images/example-denoised-sequence-1024px.png)
 
 This image is richer detail than the original fuzzy image we passed in (as a latent) before iterative mixing, but it also has some residual noise that shows up as graininess. The graininess results because the stable diffusion model was never trained to operate in this manner and is unable to eliminate all of the noise that was mixed in step by step by the iterative mixing sampler:
 
