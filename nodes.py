@@ -215,7 +215,7 @@ class BatchUnsampler:
         out = {"samples": z}
         return (out,)
 
-def get_linear_blending_schedule(indices, _, stop_blending_at_step=None):
+def get_linear_blending_schedule(indices, _, stop_blending_at_step=None, alpha_1=None):
     """
     Define a linear tensor from 0 to 1 across the given indices.
     Yes this could just be a one-liner, but I'm putting it in a
