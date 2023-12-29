@@ -3,6 +3,12 @@
 This repo contains 2 nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI) that combine to implement a strategy I'm calling Iterative Mixing of Latents.
 The technique is stolen from the [DemoFusion](https://arxiv.org/abs/2311.16973) paper with gratitude. I also acknowledge [BlenderNeko](https://github.com/BlenderNeko) for the inspiration that led to the Batch Unsampler node included in this pack.
 
+## Updates
+
+### December 29th, 2023
+
+- Added `blending_function`, which lets you change the way that latents are blended. Try blending using slerp instead of basic addition.
+
 ## Nodes
 
 ### Iterative Mixing KSampler:

@@ -1,6 +1,6 @@
 import math
 import io
-from typing import Dict, Callable
+from typing import Dict, Callable, List
 
 from abc import ABC, abstractmethod
 import comfy.model_management
@@ -12,15 +12,28 @@ import numpy as np
 from PIL import Image
 import torch
 
-BLENDING_SCHEDULES = ["cosine", "linear", "logistic"]
-BLENDING_FUNCTIONS = ["addition", "slerp", "norm_only"]
-
 class IterativeMixerException(Exception):
     pass
 
 def _trace(msg):
     import logging as logger
     logger.warning(msg)
+
+def _generate_class_map(cls: type, name_attribute: str) -> Dict[str, type]:
+    """
+    Generate a dict mapping from strings to classes. Each class should
+    have a name_attribute (e.g. 'name') that provides a friendly name
+    for the class.
+    """
+    import inspect
+    subclasses_dict = {}
+    for _, subclass in globals().items():
+        if inspect.isclass(subclass) and issubclass(subclass, cls) and subclass is not cls:
+            theName = getattr(subclass, name_attribute, None)
+            if theName is None:
+                raise ValueError(f"missing {name_attribute} in {subclass}")
+            subclasses_dict[theName] = subclass
+    return subclasses_dict
 
 def _safe_get(theDict, key, theType):
     """
@@ -43,6 +56,7 @@ class BlendingSchedule(ABC):
     Base class for blending schedules. The __call__method runs various centralized
     things and then dispatches to a derived class to generate the blending schedule.
     """
+
     def __call__(self, indices: list[int], **kwargs) -> torch.Tensor:
         # Intercept the clamp_above_pct parameter here and delete it
         # because the individual schedule functions do not need it.
@@ -63,6 +77,8 @@ class BlendingSchedule(ABC):
         raise NotImplementedError("this method must be implemented in derived classes")
 
 class CosineBlendingSchedule(BlendingSchedule):
+    _argname = "cosine"
+
     def blend(self, indices: list[int], **kwargs) -> torch.Tensor:
         """
         Define a tensor representing the constant c1 from the DemoFusion paper.
@@ -96,6 +112,8 @@ class CosineBlendingSchedule(BlendingSchedule):
         return c1
     
 class LinearBlendingSchedule(BlendingSchedule):
+    _argname = "linear"
+
     def blend(self, indices: list[int], **kwargs) -> torch.Tensor:
         """
         Define a linear tensor from 0 to 1 across the given indices.
@@ -122,6 +140,8 @@ class LinearBlendingSchedule(BlendingSchedule):
         return linear_schedule
 
 class LogisticBlendingSchedule(BlendingSchedule):
+    _argname = "logistic"
+
     def blend(self, indices: list[int], **kwargs) -> torch.Tensor:
         """
         Generate a logistic function ranging between x=[0,1] given step
@@ -165,6 +185,110 @@ class LogisticBlendingSchedule(BlendingSchedule):
 
         return logistic_output
 
+# Borrowed from BlenderNeko: https://github.com/BlenderNeko/ComfyUI_Noise/blob/master/nodes.py
+def slerp(low: torch.Tensor, high: torch.Tensor, val: float):
+    """
+    SLERP two latents.
+    """
+    dims = low.shape
+
+    # We need at least two dimensions (batch plus whatever else)
+    assert len(dims) >= 2
+
+    # Flatten to batches.
+    low = low.reshape(dims[0], -1)
+    high = high.reshape(dims[0], -1)
+
+    low_norm = low/torch.norm(low, dim=1, keepdim=True)
+    high_norm = high/torch.norm(high, dim=1, keepdim=True)
+
+    # in case we divide by zero
+    low_norm[low_norm != low_norm] = 0.0
+    high_norm[high_norm != high_norm] = 0.0
+
+    omega = torch.acos((low_norm*high_norm).sum(1))
+    so = torch.sin(omega)
+    res = (torch.sin((1.0-val)*omega)/so).unsqueeze(1)*low + (torch.sin(val*omega)/so).unsqueeze(1) * high
+    return res.reshape(dims)
+
+class BlendingFunction(ABC):
+    """
+    Base class for blending functions. The __call__method dispatches latent blending
+    to an appropriate subclass.
+    """
+
+    def __call__(self, l1: torch.Tensor, l2: torch.Tensor, weight: float)  -> torch.Tensor:
+        return self.blend(l1, l2, weight)
+
+    def blend(self, l1: torch.Tensor, l2: torch.Tensor, weight: float)  -> torch.Tensor:
+        raise NotImplementedError("this method must be implemented in derived classes")
+    
+class AdditiveBlendingFunction(BlendingFunction):
+    """
+    The simplest latent blending strategy is to just add them together.
+    This is the method used in the DemoFusion paper. Assuming c1 represents
+    a value from a rising blending schedule, we expect that l1 is z_prime and
+    l2 is z_hat.
+    """
+    _argname = "addition"
+    def blend(self, l1: torch.Tensor, l2: torch.Tensor, weight: float)  -> torch.Tensor:
+        return (1 - weight) * l1 + weight * l2
+    
+class NormOnlyBlendingFunction(BlendingFunction):
+    """
+    This function computes a new vector that is a blend of two latents, where the direction of l1
+    is partially aligned towards the direction of l2. The extent of this alignment is controlled
+    by the weight parameter.
+    """
+    _argname = "norm_only"
+    def blend(self, l1: torch.Tensor, l2: torch.Tensor, weight: float)  -> torch.Tensor:
+        dims = l1.shape
+
+        # We need at least two dimensions (batch plus whatever else)
+        assert len(dims) >= 2
+
+        # Reshape to flatten everything but the batch dimension.
+        l1 = l1.reshape(dims[0], -1)
+        l2 = l2.reshape(dims[0], -1)
+
+        # Normalize v2 to get its direction
+        l2_normalized = l2 / l2.norm(dim=1, keepdim=True)
+
+        # Calculate the magnitude of v1
+        l1_magnitude = l1.norm(dim=1, keepdim=True)
+
+        # Scale the normalized v2 by the magnitude of v1 and by alpha
+        result = l1 + weight * (l2_normalized * l1_magnitude - l1)
+
+        # Reshape back to the original dimensions.
+        result = result.reshape(dims)
+        return result
+
+class SLERPBlendingFunction(BlendingFunction):
+    """
+    The simplest latent blending strategy is to just add them together.
+    This is the method used in the DemoFusion paper. Assuming c1 represents
+    a value from a rising blending schedule, we expect that l1 is z_prime and
+    l2 is z_hat.
+    """
+    _argname = "slerp"
+
+    def blend(self, l1: torch.Tensor, l2: torch.Tensor, weight: float)  -> torch.Tensor:
+        """
+        Perform Spherical Linear Interpolation (SLERP) between two tensors.
+        
+        Args:
+        l1 (torch.Tensor): The first latent tensor.
+        l2 (torch.Tensor): The second latent tensor.
+        weight (float): The interpolation factor, typically between 0 and 1.
+
+        Returns:
+        torch.Tensor: The interpolated tensor.
+        """
+        _trace(f"slerp: {l1.shape}, {l2.shape}, {weight}")
+
+        result = slerp(l1, l2, weight)
+        return result
 
 def calc_sigmas(model, sampler_name, scheduler, steps, start_at_step, end_at_step):
         """
@@ -365,11 +489,11 @@ class BatchUnsampler:
         out = {"samples": z}
         return (out,)
 
-BLENDING_SCHEDULE_MAP: Dict[str, BlendingSchedule] = {
-    "cosine": CosineBlendingSchedule,
-    "linear": LinearBlendingSchedule,
-    "logistic": LogisticBlendingSchedule
-}
+BLENDING_SCHEDULE_MAP = _generate_class_map(BlendingSchedule, "_argname")
+_trace(f"blending schedule map: {BLENDING_SCHEDULE_MAP}")
+
+BLENDING_FUNCTION_MAP = _generate_class_map(BlendingFunction, "_argname")
+_trace(f"blending function map: {BLENDING_FUNCTION_MAP}")
 
 def plot_blending_schedule(schedule: torch.Tensor) -> torch.Tensor:
     """
@@ -405,45 +529,23 @@ def plot_blending_schedule(schedule: torch.Tensor) -> torch.Tensor:
     return image_tensor
 
 def get_blending_schedule(indices: list[int], blending_schedule: str, **kwargs):
+    """
+    Return a blending schedule for the given list of step indices and the named
+    blending schedule (e.g. "cosine").
+    """
     # Check whether the provided schedule exists.
     if blending_schedule not in BLENDING_SCHEDULE_MAP:
         raise ValueError(f"invalid blending_schedule: {blending_schedule}")
-    
-    # Intercept the clamp_above_pct parameter here and delete it
-    # because the individual schedule functions do not need it.
-    clamp_above_pct = kwargs.get("clamp_blending_at_pct")
-    if "clamp_blending_at_pct" in kwargs:
-        del kwargs["clamp_blending_at_pct"]
 
     # Generate a blending schedule by running the __call__ method of
     # the correct blending schedule class.
     blending_schedule_generator = BLENDING_SCHEDULE_MAP[blending_schedule]()
     schedule = blending_schedule_generator(indices, **kwargs)
-
-    # If configured, clamp the schedule to 1.0 for steps above
-    # the given index.
-    if clamp_above_pct is not None:
-        clamp_above = int(clamp_above_pct * len(schedule))
-        _trace(f"clamping above {clamp_above_pct}, steps={clamp_above}")
-
-        schedule[clamp_above:] = 1.0
     
     return schedule
 
-def blend_latents_by_sum(l1: torch.Tensor, l2: torch.Tensor, c1: float)  -> torch.Tensor:
-    """
-    The simplest latent blending strategy is to just add them together.
-    This is the method used in the DemoFusion paper. Assuming c1 represents
-    a value from a rising blending schedule, we expect that l1 is z_prime and
-    l2 is z_hat.
-
-    Parameters:
-    l1: The first latent to blend.
-    l2: The second latent to blend.
-    c1: The proportion of l2 to blend with (1 - c1) of l1.
-    """
-
-    return (1 - c1) * l1 + c1 * l2
+def get_blending_function(blending_function):
+    return BLENDING_FUNCTION_MAP[blending_function]()
 
 def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
                               latent_image_batch, denoise=1.0, disable_noise=False,
@@ -452,7 +554,7 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
                               start_blending_at_pct=0.0,
                               stop_blending_at_pct=1.0,
                               clamp_blending_at_pct=1.0,
-                              blending_function=blend_latents_by_sum):
+                              blending_function="addition"):
     # I originally had a step_increment argument but there is no purpose
     # to it, because you can just set the step count and of course
     # the sigmas and everything will adjust accordingly.
@@ -550,6 +652,9 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
     # latents.
     c1 = c1.to(z_primes.device)
 
+    # Get a blending function.
+    blend = get_blending_function(blending_function)
+
     # The paper suggests that we de-noise the image step by step, blending
     # in samples from the noised z_hat tensor along the way according to 
     # a blending schedule given by the c1 tensor. Each successively de-noised
@@ -619,7 +724,7 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
         # z_hat[i] = denoise(z[i-1]) * (1 - c1[i]) + z_prime[i-1] * c1
 
         c1_i = c1[zp_idx]
-        z_i = blend_latents_by_sum(z_prime_i, samples_i, c1_i)
+        z_i = blend(z_prime_i, samples_i, c1_i)
 
         z_out[out_i] = z_i
 
@@ -668,10 +773,10 @@ class IterativeMixingKSamplerAdv:
                     "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                     "alpha_1": ("FLOAT", {"default": 0.1, "min": 0.05, "max": 100.0, "step": 0.05}),
                     "reverse_input_batch": ("BOOLEAN", {"default": True}),
-                    "blending_schedule": (BLENDING_SCHEDULES, {"default": "cosine"}),
+                    "blending_schedule": (list(BLENDING_SCHEDULE_MAP.keys()), {"default": "cosine"}),
                     "stop_blending_at_pct": ("FLOAT", {"default": 1.0}),
                     "clamp_blending_at_pct": ("FLOAT", {"default": 1.0}),
-                    "blending_function": (BLENDING_FUNCTIONS, {"default": "addition"})
+                    "blending_function": (list(BLENDING_FUNCTION_MAP.keys()), {"default": "addition"})
                     }
                 }
 
@@ -714,8 +819,10 @@ class IterativeMixingKSamplerSimple:
                     "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                     "alpha_1": ("FLOAT", {"default": 0.1, "min": 0.05, "max": 100.0, "step": 0.05}),
 
-                    "blending_schedule": (BLENDING_SCHEDULES, {"default": "cosine"}),
-                    "stop_blending_at_pct": ("FLOAT", {"default": 1.0})
+                    "blending_schedule": (list(BLENDING_SCHEDULE_MAP.keys()), {"default": "cosine"}),
+                    "blending_function": (list(BLENDING_FUNCTION_MAP.keys()), {"default": "addition"}),
+
+                    "normalize_on_mean": ("BOOLEAN", {"default": False})
                      }
                 }
 
@@ -731,15 +838,17 @@ class IterativeMixingKSamplerSimple:
                seed, steps, cfg, sampler_name, scheduler,
                denoise, alpha_1,
                blending_schedule,
-               stop_blending_at_pct):
+               blending_function,
+               normalize_on_mean):
         (z_primes,) = self.batch_unsampler.unsampler(model, sampler_name,
                                                  scheduler, steps,
                                                  0, steps,
-                                                 latent_image)
+                                                 latent_image, normalize=normalize_on_mean)
         (z_out, _, _, _) = iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
                                                   z_primes, denoise=denoise, alpha_1=alpha_1, reverse_input_batch=True,
                                                   blending_schedule=blending_schedule,
-                                                  stop_blending_at_pct=stop_blending_at_pct)
+                                                  blending_function=blending_function,
+                                                  stop_blending_at_pct=1.0)
 
         # Return just the final z_out (as a 4D tensor)
         return ({"samples": z_out["samples"][-1:]},)
