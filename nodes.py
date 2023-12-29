@@ -1,14 +1,170 @@
-import torch
+import math
+import io
 from typing import Dict, Callable
+
+from abc import ABC, abstractmethod
 import comfy.model_management
 import comfy.sample
 import comfy.utils
 import comfy.samplers
-import logging as logger
-from PIL import Image
+import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
+import torch
 
 BLENDING_SCHEDULES = ["cosine", "linear", "logistic"]
+BLENDING_FUNCTIONS = ["addition", "slerp", "norm_only"]
+
+class IterativeMixerException(Exception):
+    pass
+
+def _trace(msg):
+    import logging as logger
+    logger.warning(msg)
+
+def _safe_get(theDict, key, theType):
+    """
+    Safely gives you a value of the requested type from a dict given a dict key.
+    The return type is guaranteed to be of type theType. If the value is None,
+    then we return None rather than generating a conversion error.
+    """
+    value = theDict.get(key)
+
+    if value is None:
+        return None
+
+    try:
+        return theType(theDict.get(key))
+    except (ValueError, TypeError) as e:
+        raise ValueError(f'must provide a {theType} value for {key}') from e
+
+class BlendingSchedule(ABC):
+    """
+    Base class for blending schedules. The __call__method runs various centralized
+    things and then dispatches to a derived class to generate the blending schedule.
+    """
+    def __call__(self, indices: list[int], **kwargs) -> torch.Tensor:
+        # Intercept the clamp_above_pct parameter here and delete it
+        # because the individual schedule functions do not need it.
+        schedule = self.blend(indices, **kwargs)
+
+        # If configured, clamp the schedule to 1.0 for steps above
+        # the given index.
+        clamp_above_pct = _safe_get(kwargs, "clamp_blending_at_pct", float)
+        if clamp_above_pct is not None:
+            clamp_above = int(clamp_above_pct * len(schedule))
+            _trace(f"clamping above {clamp_above_pct}, steps={clamp_above}")
+
+            schedule[clamp_above:] = 1.0
+
+        return schedule
+
+    def blend(self, indices: list[int], **kwargs) -> torch.Tensor:
+        raise NotImplementedError("this method must be implemented in derived classes")
+
+class CosineBlendingSchedule(BlendingSchedule):
+    def blend(self, indices: list[int], **kwargs) -> torch.Tensor:
+        """
+        Define a tensor representing the constant c1 from the DemoFusion paper.
+        """
+
+        stop_blending_at_step = _safe_get(kwargs, "stop_blending_at_step", int)
+        alpha_1 = _safe_get(kwargs, "alpha_1", float)
+
+        steps = indices[-1] + 1
+
+        if stop_blending_at_step is not None:
+            if stop_blending_at_step > steps:
+                _trace("setting stop_blending_at to an index greater than step count produces weird results:")
+            _trace("setting stop_blending_at to %s out of %s steps" % (stop_blending_at_step, steps))
+            steps = stop_blending_at_step
+        
+        t = torch.tensor(indices)
+
+        # Calculate cosine_factor with adjusted step size
+        cosine_factor = 0.5 * (1 + torch.cos(torch.pi * (steps - t) / steps))
+
+        # Apply the alpha exponentiation
+        c1 = cosine_factor ** alpha_1
+
+        # If you set stop_blending_at_step, then we have to clamp
+        # the remaining values to 1.0. This line has no effect if
+        # we are blending out to the full number of steps in the indices
+        # parameter.
+        c1 = torch.where(t > steps, torch.tensor(1.0), c1)
+
+        return c1
+    
+class LinearBlendingSchedule(BlendingSchedule):
+    def blend(self, indices: list[int], **kwargs) -> torch.Tensor:
+        """
+        Define a linear tensor from 0 to 1 across the given indices.
+        Yes this could just be a one-liner, but I'm putting it in a
+        function. This is an alternative blending schedule to the cosine
+        schedule to see what differs in the output.
+        """
+
+        steps = indices[-1] + 1
+        start_blending_at_step = _safe_get(kwargs, "start_blending_at_step", int) or 0
+        stop_blending_at_step = _safe_get(kwargs, "stop_blending_at_step", int) or steps
+
+        if stop_blending_at_step is not None:
+            if stop_blending_at_step > steps:
+                _trace("setting stop_blending_at to an index greater than step count produces weird results:")
+            steps = stop_blending_at_step        
+
+        t = torch.tensor(indices)
+        linear_schedule = t / steps
+
+        linear_schedule = torch.where(t > steps,                  torch.tensor(1.0), linear_schedule)
+        linear_schedule = torch.where(t < start_blending_at_step, torch.tensor(0.0), linear_schedule)
+        
+        return linear_schedule
+
+class LogisticBlendingSchedule(BlendingSchedule):
+    def blend(self, indices: list[int], **kwargs) -> torch.Tensor:
+        """
+        Generate a logistic function ranging between x=[0,1] given step
+        indices that range between any two extreems. The logistic will be guaranteed
+        to hit x=1 at the max step value in the indices.
+
+        Parameters:
+        indices (torch.Tensor): 1D tensor of x-coordinates.
+        start_blending_at_step (int): the starting step for the blending curve.
+        stop_blending_at_step (int): the ending step for the blending curve.
+
+        Returns:
+        torch.Tensor: Output of the logistic function.
+        """
+        indices = torch.tensor(indices)
+        max_step = torch.max(indices)
+        alpha_1 = _safe_get(kwargs, "alpha_1", float)
+        steepness = alpha_1 * 5 # arbitrary
+        start_blending_at_step = _safe_get(kwargs, "start_blending_at_step", int) or 0
+        stop_blending_at_step = _safe_get(kwargs, "stop_blending_at_step", int) or steps
+
+        if max_step == 0:
+            raise IterativeMixerException("the maximum blending step cannot be zero")
+        
+        midpoint = (((stop_blending_at_step or max_step) + (start_blending_at_step)) / 2) / max_step
+
+        # Adjust the step indices such that the curve ranges over x from 0.0 to 1.0.
+        indices = indices.float() / max_step
+
+        # Apply the logistic function
+        logistic_output = 1 / (1 + torch.exp(-steepness * (indices - midpoint)))
+
+        # Clamp the output to 1.0 for x-values above the specified threshold
+        if stop_blending_at_step is not None:
+            x = stop_blending_at_step / max_step
+            logistic_output = torch.where(indices > x, torch.tensor(1.0), logistic_output)
+
+        if start_blending_at_step is not None:
+            x = start_blending_at_step / max_step
+            logistic_output = torch.where(indices < x, torch.tensor(0.0), logistic_output)
+
+        return logistic_output
+
 
 def calc_sigmas(model, sampler_name, scheduler, steps, start_at_step, end_at_step):
         """
@@ -52,16 +208,12 @@ def generate_noised_latents(x, sigmas, normalize=False):
     # Multiply noise by sigmas, reshaped for broadcasting
     noised_latents = x_expanded + noise * sigmas_expanded.view(-1, 1, 1, 1)
 
-    # Unscientifically normalize the batch based on the mean and std of the first
+    # Unscientifically normalize the batch based on the mean of the first
     # latent in the batch (i.e. the original latent image).
-    # Normalization may help align the noised sequence so that it has similar
-    # statistics to the image that is being noised.
     if normalize:
-        B, _, _, _ = noised_latents.shape
         source_mean = noised_latents[0].mean()
-        source_std = noised_latents[0].std()
-        logger.warning(f"normalizing noised latents by mean={source_mean} std={source_std}")
-        noised_latents = (noised_latents - source_mean) / source_std
+        _trace(f"normalizing noised latents by mean={source_mean}")
+        noised_latents = (noised_latents - source_mean)
 
     return noised_latents
 
@@ -93,8 +245,6 @@ class LatentBatchStatisticsPlot:
         """
 
         from scipy import stats
-        import matplotlib.pyplot as plt
-        import io
 
         batch = batch["samples"]
         batch_size = batch.shape[0]
@@ -215,122 +365,94 @@ class BatchUnsampler:
         out = {"samples": z}
         return (out,)
 
-def get_linear_blending_schedule(indices, stop_blending_at_step=None,
-                                 alpha_1=None, start_blending_at_step=0):
-    """
-    Define a linear tensor from 0 to 1 across the given indices.
-    Yes this could just be a one-liner, but I'm putting it in a
-    function. This is an alternative blending schedule to the cosine
-    schedule to see what differs in the output.
-    """
-    steps = indices[-1] + 1
-
-    if stop_blending_at_step is not None:
-        if stop_blending_at_step > steps:
-            logger.warning("setting stop_blending_at to an index greater than step count produces weird results:")
-        steps = stop_blending_at_step        
-
-    t = torch.tensor(indices)
-    linear_schedule = t / steps
-
-    linear_schedule = torch.where(t > steps,                  torch.tensor(1.0), linear_schedule)
-    linear_schedule = torch.where(t < start_blending_at_step, torch.tensor(0.0), linear_schedule)
-    
-    return linear_schedule
-
-def get_cosine_blending_schedule(indices, alpha_1=2.0, start_blending_at_step=0, stop_blending_at_step=None):
-    """
-    Define a tensor representing the constant c1 from the DemoFusion paper.
-    I have found that values between 0.1 and 1.0 deliver reasonable results.
-    If you go above 1.0 things get noisy.
-    If you set stop_blending_at_step to a step count, then blending will be adjusted
-    in the t-axis so that it finishes at that step; thereafter c1 will equal 1.0.
-    """
-    steps = indices[-1] + 1
-    if stop_blending_at_step is not None:
-        if stop_blending_at_step > steps:
-            logger.warning("setting stop_blending_at to an index greater than step count produces weird results:")
-        logger.warning("setting stop_blending_at to %s out of %s steps" % (stop_blending_at_step, steps))
-        steps = stop_blending_at_step
-    
-    t = torch.tensor(indices)
-
-    # Calculate cosine_factor with adjusted step size
-    cosine_factor = 0.5 * (1 + torch.cos(torch.pi * (steps - t) / steps))
-
-    # Apply the alpha exponentiation
-    c1 = cosine_factor ** alpha_1
-
-    # If you set stop_blending_at_step, then we have to clamp
-    # the remaining values to 1.0. This line has no effect if
-    # we are blending out to the full number of steps in the indices
-    # parameter.
-    c1 = torch.where(t > steps, torch.tensor(1.0), c1)
-
-    return c1
-
-def get_logistic_blending_schedule(indices: list[int],
-                                   alpha_1: float=2.0, #ignored, but maybe I'll map to steepness one day
-                                   start_blending_at_step: int=0,
-                                   stop_blending_at_step: int=None) -> torch.Tensor:
-    """
-    Generate a logistic function ranging between x=[0,1] given step
-    indices that range between any two extreems. The logistic will be guaranteed
-    to hit x=1 at the max step value in the indices.
-
-    Parameters:
-    tensor (torch.Tensor): 1D tensor of x-coordinates.
-    steepness (float): Steepness of the logistic curve.
-    midpoint (float): x-value of the sigmoid's midpoint.
-    clamp_below (float): x-value below which the curve will clamp to 0.0.
-    clamp_above (float): x-value above which the curve will clamp to 1.0.
-
-    Returns:
-    torch.Tensor: Output of the logistic function.
-    """
-    indices = torch.tensor(indices)
-    max_step = torch.max(indices)
-    steepness = alpha_1 * 5 # arbitrary
-
-    if max_step == 0:
-        raise Exception("the maximum blending step cannot be zero")
-    
-    midpoint = (((stop_blending_at_step or max_step) + (start_blending_at_step)) / 2) / max_step
-
-    # Adjust the step indices such that the curve ranges over x from 0.0 to 1.0.
-    indices = indices.float() / max_step
-
-    # Apply the logistic function
-    logistic_output = 1 / (1 + torch.exp(-steepness * (indices - midpoint)))
-
-    # Clamp the output to 1.0 for x-values above the specified threshold
-    if stop_blending_at_step is not None:
-        x = stop_blending_at_step / max_step
-        logistic_output = torch.where(indices > x, torch.tensor(1.0), logistic_output)
-
-    if start_blending_at_step is not None:
-        x = start_blending_at_step / max_step
-        logistic_output = torch.where(indices < x, torch.tensor(0.0), logistic_output)
-
-    return logistic_output
-
-BLENDING_SCHEDULE_MAP: Dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
-    "cosine": get_cosine_blending_schedule,
-    "linear": get_linear_blending_schedule,
-    "logistic": get_logistic_blending_schedule
+BLENDING_SCHEDULE_MAP: Dict[str, BlendingSchedule] = {
+    "cosine": CosineBlendingSchedule,
+    "linear": LinearBlendingSchedule,
+    "logistic": LogisticBlendingSchedule
 }
 
-def get_blending_schedule(indices: list[int], blending_schedule: dict, **kwargs):
+def plot_blending_schedule(schedule: torch.Tensor) -> torch.Tensor:
+    """
+    Generate a plot of the blending schedule as an image to output from
+    the advanced sampler node.
+    """
+
+    schedule_size = schedule.shape[0]
+    
+    # Assuming 'p_values' is the array of p-values
+    # Create a figure with subplots
+    plt.figure(figsize=(12, 8))
+    plt.plot(schedule, label="Schedule", marker='o', linestyle='-')
+    plt.title('Blending Schedule')
+    plt.xlabel('Step')
+    plt.ylabel('Fraction of z_prime to blend')
+    plt.legend()
+
+    # Adjust layout
+    plt.tight_layout()
+
+    # Save the plot to a BytesIO object
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+
+    # Create a PIL image from the buffer and move channels to the end.
+    pil_image = Image.open(buf)
+    image_tensor = pil2tensor(pil_image)
+
+    # Add a single batch dimension and we're done.
+    # The channel dimension has to go on the end.
+    return image_tensor
+
+def get_blending_schedule(indices: list[int], blending_schedule: str, **kwargs):
+    # Check whether the provided schedule exists.
     if blending_schedule not in BLENDING_SCHEDULE_MAP:
-        raise Exception("invalid blending_schedule %s" % blending_schedule)
-    return BLENDING_SCHEDULE_MAP[blending_schedule](indices, **kwargs)
+        raise ValueError(f"invalid blending_schedule: {blending_schedule}")
+    
+    # Intercept the clamp_above_pct parameter here and delete it
+    # because the individual schedule functions do not need it.
+    clamp_above_pct = kwargs.get("clamp_blending_at_pct")
+    if "clamp_blending_at_pct" in kwargs:
+        del kwargs["clamp_blending_at_pct"]
+
+    # Generate a blending schedule by running the __call__ method of
+    # the correct blending schedule class.
+    blending_schedule_generator = BLENDING_SCHEDULE_MAP[blending_schedule]()
+    schedule = blending_schedule_generator(indices, **kwargs)
+
+    # If configured, clamp the schedule to 1.0 for steps above
+    # the given index.
+    if clamp_above_pct is not None:
+        clamp_above = int(clamp_above_pct * len(schedule))
+        _trace(f"clamping above {clamp_above_pct}, steps={clamp_above}")
+
+        schedule[clamp_above:] = 1.0
+    
+    return schedule
+
+def blend_latents_by_sum(l1: torch.Tensor, l2: torch.Tensor, c1: float)  -> torch.Tensor:
+    """
+    The simplest latent blending strategy is to just add them together.
+    This is the method used in the DemoFusion paper. Assuming c1 represents
+    a value from a rising blending schedule, we expect that l1 is z_prime and
+    l2 is z_hat.
+
+    Parameters:
+    l1: The first latent to blend.
+    l2: The second latent to blend.
+    c1: The proportion of l2 to blend with (1 - c1) of l1.
+    """
+
+    return (1 - c1) * l1 + c1 * l2
 
 def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
                               latent_image_batch, denoise=1.0, disable_noise=False,
                               force_full_denoise=False, c1=None, alpha_1=0.5, reverse_input_batch=True,
-                              blending_schedule=get_cosine_blending_schedule,
+                              blending_schedule="cosine",
                               start_blending_at_pct=0.0,
-                              stop_blending_at_pct=1.0):
+                              stop_blending_at_pct=1.0,
+                              clamp_blending_at_pct=1.0,
+                              blending_function=blend_latents_by_sum):
     # I originally had a step_increment argument but there is no purpose
     # to it, because you can just set the step count and of course
     # the sigmas and everything will adjust accordingly.
@@ -403,7 +525,7 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
     # If desired, start blending at a certain step count by setting
     # the blending curve to 0.0
     start_blending_at_step = int(steps * start_blending_at_pct)
-    logger.warning(f"start_blending_at: {start_blending_at_step}")
+    _trace(f"start_blending_at: {start_blending_at_step}")
 
     # If desired, stop blending at a certain fraction of steps by
     # setting the last few values of c1 to 1.0, which will cause
@@ -411,14 +533,18 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
     # This setting can help to reduce the noisiness of the output at
     # the expense of reducing guidance slightly.
     stop_blending_at_step = int(steps * stop_blending_at_pct)
-    logger.warning(f"stop_blending_at: {stop_blending_at_step}")
+    _trace(f"stop_blending_at: {stop_blending_at_step}")
 
     # Get the blending parameter from the DemoFusion paper.
     if c1 is None:
         c1 = get_blending_schedule(zp_indices, blending_schedule, alpha_1=alpha_1,
                                    start_blending_at_step=start_blending_at_step,
-                                   stop_blending_at_step=stop_blending_at_step)
-        logger.warning('c1=[%s]' % (', '.join(f'{value:.3f}' for value in c1)))
+                                   stop_blending_at_step=stop_blending_at_step,
+                                   clamp_blending_at_pct=clamp_blending_at_pct)
+        _trace('c1=[%s]' % (', '.join(f'{value:.3f}' for value in c1)))
+
+    # Plot the blending schedule so we can return it in the advanced module.
+    blending_plot = plot_blending_schedule(c1)
 
     # Move the blending schedule tensor to the same device as our
     # latents.
@@ -493,7 +619,7 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
         # z_hat[i] = denoise(z[i-1]) * (1 - c1[i]) + z_prime[i-1] * c1
 
         c1_i = c1[zp_idx]
-        z_i = (1 - c1_i) * z_prime_i + c1_i * samples_i
+        z_i = blend_latents_by_sum(z_prime_i, samples_i, c1_i)
 
         z_out[out_i] = z_i
 
@@ -511,7 +637,7 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
     # 1. The de-noised latents.
     # 2. The noised latents that were provided at the input.
     # 3. The intermediate samples before mixing.
-    return (out, z_primes_out, intermediates_out)
+    return (out, z_primes_out, intermediates_out, blending_plot)
 
 class IterativeMixingKSamplerAdv:
     """
@@ -543,23 +669,27 @@ class IterativeMixingKSamplerAdv:
                     "alpha_1": ("FLOAT", {"default": 0.1, "min": 0.05, "max": 100.0, "step": 0.05}),
                     "reverse_input_batch": ("BOOLEAN", {"default": True}),
                     "blending_schedule": (BLENDING_SCHEDULES, {"default": "cosine"}),
-                    "stop_blending_at_pct": ("FLOAT", {"default": 1.0})
+                    "stop_blending_at_pct": ("FLOAT", {"default": 1.0}),
+                    "clamp_blending_at_pct": ("FLOAT", {"default": 1.0}),
+                    "blending_function": (BLENDING_FUNCTIONS, {"default": "addition"})
                     }
                 }
 
-    RETURN_TYPES = ("LATENT","LATENT","LATENT")
+    RETURN_TYPES = ("LATENT","LATENT","LATENT", "IMAGE",)
+    RETURN_NAMES = ("mixed_latents", "noised_latents", "intermediate_latents", "plot_image",)
     FUNCTION = "sample"
 
     CATEGORY = "test"
 
     def sample(self, model, seed, cfg, sampler_name, scheduler, positive, negative,
                latent_image_batch, denoise=1.0, alpha_1=0.1, reverse_input_batch=True,
-               blending_schedule=get_cosine_blending_schedule,
-               stop_blending_at_pct=1.0):
+               blending_schedule="cosine",
+               stop_blending_at_pct=1.0, clamp_blending_at_pct=1.0):
         return iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
                                          latent_image_batch, denoise=denoise, alpha_1=alpha_1, reverse_input_batch=True,
                                          blending_schedule=blending_schedule,
-                                         stop_blending_at_pct=stop_blending_at_pct)
+                                         stop_blending_at_pct=stop_blending_at_pct,
+                                         clamp_blending_at_pct=clamp_blending_at_pct)
 
 class IterativeMixingKSamplerSimple:
     """
@@ -606,19 +736,97 @@ class IterativeMixingKSamplerSimple:
                                                  scheduler, steps,
                                                  0, steps,
                                                  latent_image)
-        (z_out, _, _) = iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
+        (z_out, _, _, _) = iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
                                                   z_primes, denoise=denoise, alpha_1=alpha_1, reverse_input_batch=True,
                                                   blending_schedule=blending_schedule,
                                                   stop_blending_at_pct=stop_blending_at_pct)
 
         # Return just the final z_out (as a 4D tensor)
         return ({"samples": z_out["samples"][-1:]},)
+    
+
+class LatentBatchComparator:
+    """
+    Generate plots showing the differences between two batches of latents.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required":
+                    {
+                    "latent_batch_1": ("LATENT", ),
+                    "latent_batch_2": ("LATENT", )
+                     }
+                }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("plot_image",)
+
+    CATEGORY = "test"
+
+    FUNCTION = "plot_latent_differences"
+
+    def plot_latent_differences(self, latent_batch_1, latent_batch_2):
+        """
+        Generate a plot of the differences between two batches of latents.
+        """
+
+        import torch.nn.functional as F
+
+        (tensor1, tensor2) = [x["samples"] for x in (latent_batch_1, latent_batch_2)]
+        
+        # We cannot compare latent batches if their dimensions are different.
+        if tensor1.shape != tensor2.shape:
+            raise ValueError("Latent batches must have the same shape: %s != %s" %\
+                            (tensor1.shape, tensor2.shape))
+
+        # Grab the shape
+        B, C, H, W = tensor1.shape
+
+        # Vectorized calculation of pairwise Cosine Similarity
+        tensor1_flat = tensor1.view(B, -1)
+        tensor2_flat = tensor2.view(B, -1)
+
+        # Add an extra dimension to tensor1_flat for broadcasting
+        tensor1_flat_expanded = tensor1_flat.unsqueeze(1)
+
+        # Compute cosine similarity along the last dimension (C*H*W)
+        cosine_similarities_vectorized = F.cosine_similarity(tensor1_flat_expanded, tensor2_flat.unsqueeze(0), dim=2)
+
+        # Plotting the vectorized distances
+        plt.figure(figsize=(15, 10))
+
+        # Plot Cosine Similarities
+        plt.imshow(cosine_similarities_vectorized, cmap='viridis')
+        plt.title('Cosine Similarity Matrix')
+        plt.xlabel('Batch 1 Index')
+        plt.ylabel('Batch 2 Index')
+
+        plt.tight_layout()
+
+        # Save the plot to a BytesIO object
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+
+        # Create a PIL image from the buffer and move channels to the end.
+        pil_image = Image.open(buf)
+        image_tensor = pil2tensor(pil_image)
+
+        # Make this into a batch of one as required by Comfy.
+        batch_output = image_tensor.unsqueeze(0)
+
+        # Add a single batch dimension and we're done.
+        # The channel dimension has to go on the end.
+        _trace(f"image_tensor: {batch_output.shape}")
+        return batch_output
 
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
+
     "Batch Unsampler": BatchUnsampler,
     "Latent Batch Statistics Plot": LatentBatchStatisticsPlot,
+    "Latent Batch Comparison Plot": LatentBatchComparator,
     "Iterative Mixing KSampler Advanced": IterativeMixingKSamplerAdv,
     "Iterative Mixing KSampler": IterativeMixingKSamplerSimple
 }
@@ -628,5 +836,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Batch Unsampler": "Batch Unsampler",
     "Latent Batch Statistics Plot": "Latent Batch Statistics Plot",
     "Iterative Mixing KSampler Advanced": "Iterative Mixing KSampler Advanced",
-    "Iterative Mixing KSampler": "Iterative Mixing KSampler"
+    "Iterative Mixing KSampler": "Iterative Mixing KSampler",
+    "Latent Batch Comparison Plot": "Latent Batch Comparison Plot"
 }
