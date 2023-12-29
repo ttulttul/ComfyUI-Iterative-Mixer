@@ -3,11 +3,16 @@
 This repo contains 2 nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI) that combine to implement a strategy I'm calling Iterative Mixing of Latents.
 The technique is stolen from the [DemoFusion](https://arxiv.org/abs/2311.16973) paper with gratitude. I also acknowledge [BlenderNeko](https://github.com/BlenderNeko) for the inspiration that led to the Batch Unsampler node included in this pack.
 
+## Important Note about Grainy or Noisy Output
+
+The iterative mixing nodes **intentionally** output grainy-looking latents; these latents are rich in information and are not a finished product for human viewing. You must run the latent image through another KSampler to refine a bit and get rid of the noise. Depending on the parameters in the iterative mixer, you may need a denoise value that is higher or lower. Try starting with 0.1 and going up from there until the level of grain or noise in your result is tolerable.
+
 ## Updates
 
 ### December 29th, 2023
 
-- Added `blending_function`, which lets you change the way that latents are blended. Try blending using slerp instead of basic addition.
+- Added `blending_function`, which lets you change the way that latents are blended. Try blending using slerp instead of basic addition. I have found slerp creates fewer artifacts because it works better in high-dimensional spaces.
+- Reworked the node parameters a bit. This commit breaks your workflows -- sorry.
 
 ## Nodes
 
@@ -23,14 +28,10 @@ This node de-noises a latent image while mixing a bit of a noised sequence of la
 - **sampler_name**: the name of the sampler you wish to use
 - **scheduler**: the name of the scheduler to use
 - **denoise**: the denoising strength - note I'm not sure if this does anything
-- **alpha_1**: a parameter to specify how latents are mixed; try values between 0.1 and 2.0
-- **reverse_input_batch**: should always be True because the Batch Unsampler produces latents in the wrong order
-- **blending_schedule**: choose between cosine and linear to get a different effect; alpha_1 is ignored with linear
-- **stop_blending_at_pct**: select a float between 0.0 and 1.0 to stop blending at this fraction of steps for a noisier result
-
-**Note**: For even more fun, try setting `stop_blending_at_pct` to a value great than 1.0, which stretches the cosine blending
-schedule beyond the usual step range. This will have the effect of blending some share of the noised latents $`z^{'}`$ all the way
-through the entire de-noising process, leading to interesting results.
+- **alpha_1**: a parameter to specify how latents are mixed; try values between 0.1 and 5.0
+- **blending_schedule**: choose between cosine, linear, and logistic to get a different effect; alpha_1 is ignored with linear
+- **blending_function**: choose a blending function; slerp and norm_only seem to perform better than addition
+- **normalize_on_mean**: normalize the mixed latent by the mean of the of the input latent; this can help to correct washed out images
 
 ### Batch Unsampler:
 This node takes a latent image as input, adding noise to it in the manner described in the original [Latent Diffusion Paper](https://arxiv.org/abs/2112.10752).
@@ -57,8 +58,11 @@ This node de-noises a latent image while mixing a bit of the noised latents in f
 - **scheduler**: the name of the scheduler to use
 - **denoise**: the denoising strength - note I'm not sure if this does anything
 - **alpha_1**: a parameter to specify how latents are mixed; try values between 0.1 and 2.0
-- **reverse_input_batch**: should always be True because the Batch Unsampler produces latents in the wrong order
-- **blending_schedule**: choose between cosine and linear to get a different effect; alpha_1 is ignored with linear
+- **reverse_input_batch**: should always be **True** because the **Batch Unsampler** produces latents in the reverse order
+- **blending_schedule**: choose between cosine, linear, and logistic to get a different effect; alpha_1 is ignored with linear
+- **stop_blending_at_pct**: squeeze the blending schedule so that it ends at a given fraction of the total steps; values above 1.0 are also just fine to stretch the schedule past the end of the steps for interesting results
+- **clamp_blending_at_pct**: clamp the blending schedule to 1.0 at and above this fraction of total steps
+- **blending_function**: choose a blending function; slerp and norm_only seem to perform better than addition
 
 ## How the hell does this work?
 
