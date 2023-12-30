@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 import torch
+from tqdm.auto import trange, tqdm
 
 class IterativeMixerException(Exception):
     pass
@@ -376,7 +377,7 @@ class LatentBatchStatisticsPlot:
         means = []
         std_devs = []
 
-        for i in range(batch.shape[0]):
+        for i in trange(batch.shape[0]):
             # Flatten the tensor
             tensor_1d = batch[i].flatten()
 
@@ -670,7 +671,7 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
     pbar = comfy.utils.ProgressBar(steps)
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
 
-    for zp_idx, i in enumerate(zp_indices):
+    for zp_idx, i in tqdm(enumerate(zp_indices)):
         out_i = zp_idx + 1
         
         # Grab the i-th z_prime and i-th noise tensor from their batches.
@@ -706,7 +707,7 @@ def iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positiv
                         last_step=z_last_step,
                         force_full_denoise=force_full_denoise,
                         noise_mask=noise_mask,
-                        disable_pbar=disable_pbar, seed=seed,
+                        disable_pbar=True, seed=seed,
                         callback=inner_callback)
 
         # Move samples to the same device as z_prime_i so that we can
