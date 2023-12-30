@@ -9,6 +9,10 @@ The iterative mixing nodes **intentionally** output grainy-looking latents; thes
 
 ## Updates
 
+### December 30th, 2023
+
+- Fixed a bug where the `blending_function` parameter was not implemented properly in the `Iterative Mixing KSampler Advanced` node, causing an error. Sorry.
+
 ### December 29th, 2023
 
 - Added `blending_function`, which lets you change the way that latents are blended. Try blending using slerp instead of basic addition. I have found slerp creates fewer artifacts because it works better in high-dimensional spaces.

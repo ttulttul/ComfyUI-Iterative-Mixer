@@ -789,12 +789,14 @@ class IterativeMixingKSamplerAdv:
     def sample(self, model, seed, cfg, sampler_name, scheduler, positive, negative,
                latent_image_batch, denoise=1.0, alpha_1=0.1, reverse_input_batch=True,
                blending_schedule="cosine",
-               stop_blending_at_pct=1.0, clamp_blending_at_pct=1.0):
+               stop_blending_at_pct=1.0, clamp_blending_at_pct=1.0,
+               blending_function=list(BLENDING_FUNCTION_MAP.keys())[0]):
         return iterative_mixing_ksampler(model, seed, cfg, sampler_name, scheduler, positive, negative,
                                          latent_image_batch, denoise=denoise, alpha_1=alpha_1, reverse_input_batch=True,
                                          blending_schedule=blending_schedule,
                                          stop_blending_at_pct=stop_blending_at_pct,
-                                         clamp_blending_at_pct=clamp_blending_at_pct)
+                                         clamp_blending_at_pct=clamp_blending_at_pct,
+                                         blending_function=blending_function)
 
 class IterativeMixingKSamplerSimple:
     """
