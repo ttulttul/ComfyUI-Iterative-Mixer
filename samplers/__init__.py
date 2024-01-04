@@ -260,7 +260,7 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
             if perlin_mode == "latents":
                 x = perlin_tensors[i].unsqueeze(0) * perlin_strength + (1. - perlin_strength) * x
             elif perlin_mode == "masks":
-                x, sigma_hat, denoised = denoise_step(x, i, s_in, denoise_mask=perlin_tensors[i] * (1. - c1_perlin[i]))
+                x, sigma_hat, denoised = denoise_step(x, i, s_in, denoise_mask=perlin_tensors[i] * (float(1.0) - c1_perlin[i]))
             elif perlin_mode == "matched_noise":
                 matched_noise = torch.randn(C, H, W, device=z_prime_std.device) * z_prime_std[i] + z_prime_mean[i]
                 x = matched_noise * (1. - c1_perlin[i]) + x * c1_perlin[i]
