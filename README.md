@@ -28,6 +28,8 @@ In my first attempt at iterative mixing, I developed a few KSampler-type nodes t
 
 ### IterativeMixingSampler:
 
+*Important*: Do not enable `add_noise` in the `SamplerCustom` node. The iterative mixing sampler does not need noise to be injected by the `SamplerCustom` node and will generate garbage if this option is set to `true`.
+
 This node feeds into a `SamplerCustom` node to implement iterative mixing sampling, with various options to control the process.
 - **model**: a diffusion model
 - **mixing_masks**: *this optional parameter is currenty unused*; in future, you will be able to feed in a batch of masks that will be mixed in at each stage of denoising
