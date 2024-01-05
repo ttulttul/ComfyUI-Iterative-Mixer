@@ -19,7 +19,7 @@ def perlin_masks(batch_size: int, width: int, height: int, device=None, seed: in
     
     c = PerlinPowerFractal(width, height)
     masks = c.forward(batch_size, 0, 0, 0, 0, device=torch.device("cpu"), seed=seed, scale=scale, **kwargs)
-    masks.to(device)
+    masks = masks.to(device)
 
     # return shape is [B, H, W, 1]
     return masks
