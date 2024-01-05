@@ -7,7 +7,8 @@ import torch
 
 def _trace(msg):
     "Print out a message to the log facility; using warning makes sure it prints."
-    logging.warning(msg)
+    #logging.warning(msg)
+    pass
 
 def generate_class_map(cls: type, name_attribute: str) -> Dict[str, type]:
     """
