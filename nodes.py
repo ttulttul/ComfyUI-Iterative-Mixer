@@ -1,6 +1,5 @@
 import functools
 import io
-import logging
 
 from abc import ABC
 import comfy.model_management
@@ -17,9 +16,7 @@ import torch.nn.functional as F
 from tqdm.auto import trange, tqdm
 
 from .samplers import SAMPLERS_MAP, BLENDING_FUNCTION_MAP, BLENDING_SCHEDULE_MAP
-
-def _trace(msg):
-    logging.warning(msg)
+from .utils.noise import perlin_masks
 
 @torch.no_grad
 def calc_sigmas(model, sampler_name, scheduler, steps, start_at_step, end_at_step):
@@ -826,6 +823,49 @@ class LatentBatchComparator:
         batch_output = image_tensor.unsqueeze(0)
         return batch_output
 
+class MixingMaskGeneratorNode:
+    """
+    A node that can generate different kinds of noise mask batches for
+    iterative mixing purposes.
+    """
+
+    MASK_TYPES = ["perlin", "random"]
+    MAX_RESOLUTION=8192 # copied and pasted from ComfyUI/nodes.py; there is no library way to get this number
+
+    def __init__(self):
+        self.device = comfy.model_management.intermediate_device()
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "mask_type": (s.MASK_TYPES, {"default": "perlin"}),
+                "perlin_scale": ("FLOAT", {"default": 10., "min": 0.1, "max": 400.0, "step": 0.01}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "width": ("INT", {"default": 512, "min": 16, "max": s.MAX_RESOLUTION, "step": 8}),
+                "height": ("INT", {"default": 512, "min": 16, "max": s.MAX_RESOLUTION, "step": 8}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096})}}
+    
+    RETURN_TYPES = ("MASK",)
+    CATEGORY = "mask/generation"
+
+    FUNCTION = "get_masks"
+
+    def get_masks(self, mask_type, perlin_scale, seed, width, height, batch_size):
+        mask_height = height // 8
+        mask_width = width // 8
+        
+        if mask_type == "perlin":
+            perlin_tensors = perlin_masks(batch_size, mask_width, mask_height, device=self.device, seed=seed, scale=perlin_scale)
+            masks = perlin_tensors.view(batch_size, 1, mask_height, mask_width)
+        elif mask_type == "random":
+            masks = torch.randn([batch_size, width // 8, height // 8])
+        else:
+            raise ValueError("invalid mask_type")
+        
+        return (masks,)
+
+
 class IterativeMixingSamplerNode:
     """
     A sampler implementing iterative mixing of latents.
@@ -849,6 +889,9 @@ class IterativeMixingSamplerNode:
                     "perlin_mode": (s.PERLIN_MODES, {"default": "masks"}),
                     "perlin_strength": ("FLOAT", {"default": 0.75, "step": 0.001}),
                     "perlin_scale": ("FLOAT", {"default": 10., "min": 0.1, "max": 400.0})
+        },
+        "optional": {
+            "mixing_masks": ("MASK",)
         }}
     RETURN_TYPES = ("SAMPLER",)
     CATEGORY = "sampling/custom_sampling/samplers"
@@ -868,7 +911,7 @@ class IterativeMixingSamplerNode:
                     blending_schedule, blending_function, normalize_on_mean,
                     start_blending_at_pct, stop_blending_at_pct,
                     clamp_blending_at_pct, blend_min, blend_max,
-                    perlin_mode, perlin_strength, perlin_scale):
+                    perlin_mode, perlin_strength, perlin_scale, mixing_masks=None):
         extras = {k: v for k, v in locals().items() if k != 'self'}
 
         # We cannot have an extra arg called "model" as this will conflict with
@@ -931,6 +974,7 @@ NODE_CLASS_MAPPINGS = {
     "Iterative Mixing KSampler": IterativeMixingKSamplerSimple,
     "IterativeMixingSampler": IterativeMixingSamplerNode,
     "IterativeMixingScheduler": IterativeMixingScheduler,
+    "MixingMaskGenerator": MixingMaskGeneratorNode
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes

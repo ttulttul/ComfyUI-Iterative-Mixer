@@ -1,8 +1,13 @@
 "Utilities for the Iterative Mixing Sampler node pack."
 
 import inspect
+import logging
 from typing import Dict
 import torch
+
+def _trace(msg):
+    "Print out a message to the log facility; using warning makes sure it prints."
+    logging.warning(msg)
 
 def generate_class_map(cls: type, name_attribute: str) -> Dict[str, type]:
     """

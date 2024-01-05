@@ -174,13 +174,17 @@ class PerlinPowerFractal(nn.Module):
         p_count = max(self.width, self.height) ** 2
         p_all = torch.stack([torch.randperm(p_count, dtype=torch.int32, device=device).repeat(2) for _ in range(batch_size)])
         
+        # Initialize an empty latent batch that we will put the masks into.
+        # This gives us a tensor with shape [batch_size, height, width].
+        latent = torch.zeros(batch_size, self.height, self.width, dtype=torch.float32, device=device)
+
         # Generate unique perlin noise in each batch entry.
         for batch_idx in range(batch_size):
             # Get our slice of randomness.
             p = p_all[batch_idx]
 
             # Create noise_map for each item in the batch
-            noise_map_single = torch.zeros(self.height, self.width, dtype=torch.float32, device=device)
+            noise_map_single = latent[batch_idx]
 
             X_ = torch.arange(self.width, dtype=torch.float32, device=device).unsqueeze(0) + X
             Y_ = torch.arange(self.height, dtype=torch.float32, device=device).unsqueeze(1) + Y
@@ -203,11 +207,8 @@ class PerlinPowerFractal(nn.Module):
             latent_single = (noise_map_single + brightness) * (1.0 + contrast)
             latent_single = range_normalize(latent_single)
 
-            # Add the single noise_map to the batch
-            # XXX: This is somewhat inefficient.
-            if batch_idx == 0:
-                latent = latent_single.unsqueeze(0).unsqueeze(-1)
-            else:
-                latent = torch.cat((latent, latent_single.unsqueeze(0).unsqueeze(-1)), dim=0)
+            # Add this latent to the batch.
+            latent[batch_idx] = latent_single
 
-        return latent
+        # Append a singleton final dimension to represent the grayscale channel before returning.
+        return latent.unsqueeze(-1)

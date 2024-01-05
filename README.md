@@ -1,13 +1,19 @@
 # ComfyUI Iterative Mixing Nodes
 
-This repo contains 2 nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI) that combine to implement a strategy I'm calling Iterative Mixing of Latents.
-The technique is stolen from the [DemoFusion](https://arxiv.org/abs/2311.16973) paper with gratitude. I also acknowledge [BlenderNeko](https://github.com/BlenderNeko) for the inspiration that led to the Batch Unsampler node included in this pack.
+This repo contains nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI) that combine to implement a strategy I'm calling Iterative Mixing of Latents.
+The technique is somewhat borrowed from the [DemoFusion](https://arxiv.org/abs/2311.16973) paper, with gratitude. I also acknowledge [BlenderNeko](https://github.com/BlenderNeko) for the inspiration that led to the Batch Unsampler node included in this pack.
 
-## Important Note about Grainy or Noisy Output
+## Note: This pack contains some deprecated nodes
 
-The iterative mixing nodes **intentionally** output grainy-looking latents; these latents are rich in information and are not a finished product for human viewing. You must run the latent image through another KSampler to refine a bit and get rid of the noise. Depending on the parameters in the iterative mixer, you may need a denoise value that is higher or lower. Try starting with 0.1 and going up from there until the level of grain or noise in your result is tolerable.
+In my first attempt at iterative mixing, I developed a few KSampler-type nodes that call the underlying `sample()` function inside ComfyUI to denoise and then mix noised latents step by step. This method produces grainy output for reasons I don't yet fully understand. On the advice of @comfyanonymous, I have now moved onto a new approach that uses the `SamplerCustom` node.
 
 ## Updates
+
+## January 4th, 2024
+
+- Added new nodes that implement iterative mixing in combination with the `SamplerCustom` node from ComfyUI, which produces very clean output (no graininess). See the documentation below for details along with a new example workflow. This new approach includes the addition of a noise masking strategy that may improve results further.
+- Reorganized the code into separate source files to keep things tidy.
+- Archived old workflow examples that may not work properly after the reorganization.
 
 ### December 30th, 2023
 
@@ -19,6 +25,37 @@ The iterative mixing nodes **intentionally** output grainy-looking latents; thes
 - Reworked the node parameters a bit. This commit breaks your workflows -- sorry.
 
 ## Nodes
+
+### IterativeMixingSampler:
+
+This node feeds into a `SamplerCustom` node to implement iterative mixing sampling, with various options to control the process.
+- **model**: a diffusion model
+- **mixing_masks**: *this optional parameter is currenty unused*; in future, you will be able to feed in a batch of masks that will be mixed in at each stage of denoising
+- **sampler**: select a sampling method such as `euler`
+- **alpha_1**: a parameter that controls the `blending_schedule` curve's steepness
+- **blending_schedule**: select between `cosine`, `logistic`, and `linear` blending curves for different results
+- **blending_function**: select between `addition`, `slerp`, and `norm_only` to slightly vary how the latents are blended during sampling
+- **normalize_on_mean**: normalize the input latent by subtracting out its mean value; this fixes a known issue with SD models that produce washed out images
+- **start_blending_at_pct**: set the fraction of `steps` at which the blending curve will begin to start mixing in diffused latents; prior to this fraction of `steps`, only the noised `z_prime` latents will be sent to the model for denoising
+- **stop_blending_at_pct**: set the fraction of `steps` at which the blending curve will stop mixing in noised latents; after this point, the model will only be given denoised latents
+- **clamp_blending_at_pct**: without altering the blending curve, clamp the curve to 1.0 to halt blending of noised latents after this fraction of `steps`; this setting can be more effective than `stop_blending_at_pct` but has a similar effect
+- **blend_min**: squeeze the minimum value of the blending curve to this value; this has the effect of putting a minimum on the fraction of the denoised latent that is blended with the noised latent sequence
+- **blend_max**: squeeze the maximum value of the blending curve to this value; this has the effect of putting a maximum on the fraction of the denoised latent that is blended with the noised latent sequence, ensuring that some amount of the noise latent is always blended in
+- **perlin_mode**: used with the `euler_perlin` sampler option above, this selects between different perlin noise blending modes; if I have time, I'll write some documentation to describe precisely what these modes do
+- **perlin_strength**: a metric that controls the amount of perlin noise operations that take place during sampling
+- **perlin_scale**: this controls the blobby-ness of the perlin noise; values near 1.0 are close to pure noise where as values close to 100.0 result in huge blobs taking up nearly the entire area
+
+### IterativeMixingScheduler:
+
+Use this node in combination with the `IterativeMixingSampler` described above. This node generates a set of sigmas to feed into the mixing sampler. It requires a model input to fetch the sigmas-related parameters from the model. The options on this node should be self-explanatory.
+
+## MixingMaskGeneratorNode:
+
+This node generates a batch of perlin noise masks. In future, you will be able to feed these masks into the `IterativeMixingSampler` to precisely control latent mixing by applying a mask to the process at each step. For now, it offers a way to see for yourself what the perlin masks look like at various scale levels.
+
+## Deprecated Nodes
+
+The nodes described below are deprecated. Use them at your own risk to obtain interesting and potentially buggy results.
 
 ### Iterative Mixing KSampler:
 This node de-noises a latent image while mixing a bit of a noised sequence of latents at each step.
