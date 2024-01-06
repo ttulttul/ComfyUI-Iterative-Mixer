@@ -18,7 +18,8 @@ def perlin_masks(batch_size: int, width: int, height: int, device=None, seed: in
         device = comfy.model_management.get_torch_device()
     
     c = PerlinPowerFractal(width, height)
-    masks = c.forward(batch_size, 0, 0, 0, 0, device=device, seed=seed, scale=scale, **kwargs)
+    masks = c.forward(batch_size, 0, 0, 0, 0, device=torch.device("cpu"), seed=seed, scale=scale, **kwargs)
+    masks = masks.to(device)
 
     # return shape is [B, H, W, 1]
     return masks
