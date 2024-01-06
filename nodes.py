@@ -15,8 +15,9 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import trange, tqdm
 
-from .samplers import SAMPLERS_MAP, BLENDING_FUNCTION_MAP, BLENDING_SCHEDULE_MAP
+from .samplers import SAMPLERS_MAP, BLENDING_FUNCTION_MAP, BLENDING_SCHEDULE_MAP, get_blending_schedule, get_blending_function
 from .utils.noise import perlin_masks
+from .utils import generate_noised_latents
 
 @torch.no_grad
 def calc_sigmas(model, sampler_name, scheduler, steps, start_at_step, end_at_step):

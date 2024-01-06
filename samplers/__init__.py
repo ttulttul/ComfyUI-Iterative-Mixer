@@ -1,5 +1,4 @@
 from abc import ABC
-import comfy.model_management
 import comfy.sample
 import comfy.samplers
 import comfy.utils
@@ -8,7 +7,7 @@ import comfy.k_diffusion.sampling
 import torch
 from tqdm.auto import trange
 
-from ..utils import generate_class_map, generate_noised_latents, slerp, _trace
+from ..utils import generate_class_map, generate_noised_latents, slerp
 from ..utils.noise import perlin_masks
 
 def _safe_get(theDict, key, theType):
@@ -237,22 +236,17 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
 
         if mixing_masks is not None:
             perlin_tensors = mixing_masks
-            _trace(f"mixing_masks=perlin_tensors={perlin_tensors.shape}")
         else:
             # Generate a batch of perlin noise. Depending on the perlin_mode,
             # this function either gives us a batch of perlin masks or a batch
             # of perlin latents that we will apply below.        
             perlin_tensors = self.get_masks(perlin_mode, loop_count, C, W, H, x.device,
                                             seed=seed, scale=perlin_scale)
-            _trace(f"perlin_tensors={perlin_tensors.shape}")
 
         # Create a blending schedule for the perlin noise that is scaled
         # via the perlin_strength parameter. c1_perlin will range between
         # c1_perlin and 1.0.
         c1_perlin = 1.0 + perlin_strength * (c1 - 1.0)
-
-        _trace(f'perlin_strength={perlin_strength}')
-        _trace(f'c1_perlin={c1_perlin}')
 
         for i in trange(loop_count, disable=disable):
             x, sigma_hat, denoised = denoise_step(x, i, s_in)
@@ -269,7 +263,6 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
             if perlin_mode == "latents":
                 x = perlin_tensors[i].unsqueeze(0) * perlin_strength + (1. - perlin_strength) * x
             elif perlin_mode == "masks":
-                _trace(f"perlin_tensors[{i}].std={perlin_tensors[i].std():.3f}, c1_perlin[{i}]={c1_perlin[i]}")
                 x, sigma_hat, denoised = denoise_step(x, i, s_in, denoise_mask=perlin_tensors[i] * (float(1.0) - c1_perlin[i]))
             elif perlin_mode == "matched_noise":
                 matched_noise = torch.randn(C, H, W, device=z_prime_std.device) * z_prime_std[i] + z_prime_mean[i]

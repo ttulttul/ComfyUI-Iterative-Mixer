@@ -18,6 +18,9 @@ def perlin_masks(batch_size: int, width: int, height: int, device=None, seed: in
         device = comfy.model_management.get_torch_device()
     
     c = PerlinPowerFractal(width, height)
+
+    # Not sure why, but it seems we have to use the CPU device here and then move it to the device
+    # desired by the caller or some platforms generate an error deep inside Intel code.
     masks = c.forward(batch_size, 0, 0, 0, 0, device=torch.device("cpu"), seed=seed, scale=scale, **kwargs)
     masks = masks.to(device)
 
