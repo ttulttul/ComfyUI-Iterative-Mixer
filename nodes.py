@@ -19,7 +19,7 @@ from .samplers import SAMPLERS_MAP, BLENDING_FUNCTION_MAP, BLENDING_SCHEDULE_MAP
 from .utils.noise import perlin_masks
 from .utils import generate_noised_latents
 
-@torch.no_grad
+@torch.no_grad()
 def calc_sigmas(model, sampler_name, scheduler, steps, start_at_step, end_at_step):
         """
         Copied with gratitude from [ComfyUI_Noise](https://github.com/BlenderNeko/ComfyUI_Noise/blob/master/nodes.py)
@@ -38,7 +38,7 @@ def calc_sigmas(model, sampler_name, scheduler, steps, start_at_step, end_at_ste
 
 
 
-@torch.no_grad
+@torch.no_grad()
 def pil2tensor(image: Image.Image) -> torch.Tensor:
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
 
@@ -60,7 +60,7 @@ class LatentBatchStatisticsPlot:
 
     CATEGORY = "tests"
 
-    @torch.no_grad
+    @torch.no_grad()
     def statistics(self, batch):
         """
         Run a statistical test on each latent in a batch to see how
@@ -156,7 +156,7 @@ class BatchUnsampler:
 
     CATEGORY = "tests"
 
-    @torch.no_grad
+    @torch.no_grad()
     def unsampler(self, model, sampler_name, scheduler, steps,
                   start_at_step, end_at_step, latent_image, normalize=False):
         """
@@ -949,7 +949,7 @@ class IterativeMixingScheduler:
 
     FUNCTION = "get_sigmas"
 
-    @torch.no_grad
+    @torch.no_grad()
     def get_sigmas(self, model, scheduler, steps, denoise):
         # Determine the sigmas based on the specified denoising strength.
         # This is mostly copied from comfy_extras/nodes_custom_sampler.py.

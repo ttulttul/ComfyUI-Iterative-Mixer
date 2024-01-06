@@ -50,7 +50,7 @@ class IterativeMixingSampler(ABC):
     Base class for iterative mixing versions of the usual samplers (Euler, LCM, etc.).
     """
 
-    @torch.no_grad
+    @torch.no_grad()
     def __call__(self, model, x, sigmas, extra_args=None, callback=None,
                  disable=None, noise_sampler=None,
                  model_node=None,
@@ -106,7 +106,7 @@ class IterativeMixingSampler(ABC):
         return self.sample(model, x, sigmas, z_prime, c1, blend, extra_args=extra_args, callback=callback,
                     disable=disable, s_churn=s_churn, s_tmin=s_tmin, s_tmax=s_tmax, **kwargs)
     
-    @torch.no_grad
+    @torch.no_grad()
     def sample(self, model, x, sigmas, z_prime, c1, blend, *args, **kwargs):
         raise NotImplementedError("this method must be implemented in derived classes")
 
@@ -119,7 +119,7 @@ class IterativeMixingEulerSamplerImpl(IterativeMixingSampler):
 
     _argname = "euler"
 
-    @torch.no_grad
+    @torch.no_grad()
     def sample(self, model, x, sigmas, z_prime, c1, blend, extra_args=None, callback=None,
                disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.,
                *args, **kwargs):
@@ -178,7 +178,7 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
 
     _argname = "euler_perlin"
 
-    @torch.no_grad
+    @torch.no_grad()
     def get_masks(self, mode: str, loop_count: int, C: int, W: int, H: int, device, seed: int, scale: float):
         # In direct mode, we generate Perlin latents to merge.
         if mode == "latents":
@@ -200,7 +200,7 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
         else:
             raise ValueError(f"Invalid mode {mode}; expecting 'latents' or 'masks'")
 
-    @torch.no_grad
+    @torch.no_grad()
     def sample(self, model, x, sigmas, z_prime, c1, blend, extra_args=None, callback=None,
                disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.,
                seed: int=None, perlin_mode="latents", perlin_strength=0.75, perlin_scale=10.,
@@ -221,7 +221,7 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
         z_prime_std = z_prime.std(dim=(1, 2, 3), unbiased=True)
         z_prime_mean = z_prime.mean(dim=(1, 2, 3))
 
-        @torch.no_grad
+        @torch.no_grad()
         def denoise_step(inner_x, inner_i, inner_s_in, denoise_mask=None):
             "Turn one crank of Euler against an arbitrary latent or partial latent represented by inner_x"
             gamma = min(s_churn / (len(sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigmas[inner_i] <= s_tmax else 0.
@@ -279,7 +279,7 @@ class IterativeMixingLCMSamplerImpl(IterativeMixingSampler):
 
     _argname = "lcm"
 
-    @torch.no_grad
+    @torch.no_grad()
     def sample(self, model, x, sigmas, z_prime, c1, blend, extra_args=None, callback=None,
                disable=None, noise_sampler=None, *args, **kwargs):
         extra_args = {} if extra_args is None else extra_args
@@ -345,7 +345,7 @@ class BlendingFunction(ABC):
     to an appropriate subclass.
     """
 
-    @torch.no_grad
+    @torch.no_grad()
     def __call__(self, l1: torch.Tensor, l2: torch.Tensor, weight: float)  -> torch.Tensor:
         if l1.device != l2.device:
             raise ValueError(f"BlendingFunction: l1 and l2 on different devices ({l1.device} != {l2.device})")
@@ -363,7 +363,7 @@ class AdditiveBlendingFunction(BlendingFunction):
     """
     _argname = "addition"
 
-    @torch.no_grad
+    @torch.no_grad()
     def blend(self, l1: torch.Tensor, l2: torch.Tensor, weight: float, bias: float=0.0)  -> torch.Tensor:
         weight += bias
         return (1 - weight) * l1 + weight * l2
@@ -376,7 +376,7 @@ class NormOnlyBlendingFunction(BlendingFunction):
     """
     _argname = "norm_only"
 
-    @torch.no_grad
+    @torch.no_grad()
     def blend(self, l1: torch.Tensor, l2: torch.Tensor, weight: float)  -> torch.Tensor:
         dims = l1.shape
 
@@ -409,7 +409,7 @@ class SLERPBlendingFunction(BlendingFunction):
     """
     _argname = "slerp"
 
-    @torch.no_grad
+    @torch.no_grad()
     def blend(self, l1: torch.Tensor, l2: torch.Tensor, weight: float)  -> torch.Tensor:
         """
         Perform Spherical Linear Interpolation (SLERP) between two tensors.
@@ -434,7 +434,7 @@ class BlendingSchedule(ABC):
     things and then dispatches to a derived class to generate the blending schedule.
     """
 
-    @torch.no_grad
+    @torch.no_grad()
     def __call__(self, indices: list[int], blend_min=0.0, blend_max=1.0, **kwargs) -> torch.Tensor:
         # Intercept the clamp_above_pct parameter here and delete it
         # because the individual schedule functions do not need it.
@@ -460,7 +460,7 @@ class BlendingSchedule(ABC):
 class CosineBlendingSchedule(BlendingSchedule):
     _argname = "cosine"
 
-    @torch.no_grad
+    @torch.no_grad()
     def blend(self, indices: list[int], **kwargs) -> torch.Tensor:
         """
         Define a tensor representing the constant c1 from the DemoFusion paper.
@@ -493,7 +493,7 @@ class CosineBlendingSchedule(BlendingSchedule):
 class LinearBlendingSchedule(BlendingSchedule):
     _argname = "linear"
 
-    @torch.no_grad
+    @torch.no_grad()
     def blend(self, indices: list[int], **kwargs) -> torch.Tensor:
         """
         Define a linear tensor from 0 to 1 across the given indices.
@@ -520,7 +520,7 @@ class LinearBlendingSchedule(BlendingSchedule):
 class LogisticBlendingSchedule(BlendingSchedule):
     _argname = "logistic"
 
-    @torch.no_grad
+    @torch.no_grad()
     def blend(self, indices: list[int], **kwargs) -> torch.Tensor:
         """
         Generate a logistic function ranging between x=[0,1] given step

@@ -5,7 +5,7 @@ import torch.nn as nn
 # normalize() and PerlinPowerFractal are borrowed from the PowerNoiseSuite with credit to @WASasquatch.
 # https://github.com/WASasquatch/PowerNoiseSuite
 
-@torch.no_grad
+@torch.no_grad()
 def perlin_masks(batch_size: int, width: int, height: int, device=None, seed: int=None, scale: float=10., **kwargs) -> torch.Tensor:
     """
     Generate a batch of Perlin noise masks with some nice defaults chosen
@@ -27,7 +27,7 @@ def perlin_masks(batch_size: int, width: int, height: int, device=None, seed: in
     # return shape is [B, H, W, 1]
     return masks
 
-@torch.no_grad
+@torch.no_grad()
 def range_normalize(x: torch.Tensor, target_min: float=None, target_max:float =None) -> torch.Tensor:
     """
     Linearly normalize a tensor `x` so that it ranges between 0.0 to 1.0.
@@ -102,7 +102,7 @@ class PerlinPowerFractal(nn.Module):
         self.width = width
         self.height = height
 
-    @torch.no_grad
+    @torch.no_grad()
     def forward(self, batch_size, X, Y, Z, frame, device='cpu', evolution_factor=0.1,
                 octaves=4, persistence=0.5, lacunarity=2.0, exponent=4.0, scale=100,
                 brightness=0.0, contrast=0.0, seed=None, min_clamp=0.0, max_clamp=1.0):

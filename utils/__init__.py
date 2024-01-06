@@ -28,7 +28,7 @@ def generate_class_map(cls: type, name_attribute: str) -> Dict[str, type]:
             subclasses_dict[theName] = subclass
     return subclasses_dict
 
-@torch.no_grad
+@torch.no_grad()
 def generate_noised_latents(x, sigmas, normalize=False):
     """
     Generate all noised latents for a given initial latent image and sigmas in parallel.
@@ -67,7 +67,7 @@ def generate_noised_latents(x, sigmas, normalize=False):
     return noised_latents
 
 # Borrowed from BlenderNeko: https://github.com/BlenderNeko/ComfyUI_Noise/blob/master/nodes.py
-@torch.no_grad
+@torch.no_grad()
 def slerp(low: torch.Tensor, high: torch.Tensor, val: float):
     """
     SLERP two latents.
