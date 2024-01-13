@@ -1,13 +1,15 @@
 from abc import ABC
+from typing import Optional
+import torch
+from tqdm.auto import trange
+
 import comfy.sample
 import comfy.samplers
 import comfy.utils
 import comfy.samplers
 import comfy.k_diffusion.sampling
-import torch
-from tqdm.auto import trange
 
-from ..utils import generate_class_map, generate_noised_latents, slerp
+from ..utils import generate_class_map, generate_noised_latents, slerp, _trace
 from ..utils.noise import perlin_masks
 
 def _safe_get(theDict, key, theType):
@@ -26,6 +28,59 @@ def _safe_get(theDict, key, theType):
     except (ValueError, TypeError) as e:
         raise ValueError(f'must provide a {theType} value for {key}') from e
     
+
+class ModularKSamplerX0Inpaint(comfy.samplers.KSamplerX0Inpaint):
+    """
+    A version of the KSamplerX0Inpaint that breaks out the application of
+    the denoise mask so that we can do fancier things with masking separate
+    from denoising.
+    """
+    def __init__(self, model: comfy.samplers.KSamplerX0Inpaint):
+        super().__init__(model.inner_model)
+        self.latent_image = model.latent_image
+        self.noise = model.noise
+
+    @torch.no_grad()
+    def before(self, x: torch.tensor, z_prime: torch.tensor, sigma: float, denoise_mask: Optional[torch.Tensor]) -> torch.tensor:
+        """
+        Apply the denoise mask appropriately to the x and z_prime tensors.
+        Call this method before running denoise steps in the iterative mixing sampler.
+        """
+
+        def apply_mask(x, denoise_mask, latent_mask, sigma_reshaped):
+            return x * denoise_mask + (self.latent_image + self.noise * sigma_reshaped) * latent_mask
+
+        sigma = torch.tensor([sigma], device=x.device)
+        if denoise_mask is not None:
+            latent_mask = 1. - denoise_mask
+            sigma_reshaped = sigma.reshape([sigma.shape[0]] + [1] * (len(self.noise.shape) - 1))
+
+            x = apply_mask(x, denoise_mask, latent_mask, sigma_reshaped)
+            z_prime = apply_mask(z_prime.unsqueeze(0), denoise_mask, latent_mask, sigma_reshaped)
+            z_prime = z_prime.squeeze(0)
+
+        return x, z_prime
+
+    @torch.no_grad()
+    def after(self, denoised_x: torch.Tensor, denoise_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        """
+        After the model is called, call this function to apply the latent mask
+        again so that your denoising effectively applied only to the part that
+        was masked.
+        """
+        if denoise_mask is not None:
+            latent_mask = 1. - denoise_mask
+            denoised_x = denoised_x * denoise_mask + self.latent_image * latent_mask
+        else:
+            # nothing to do
+            pass
+
+        return denoised_x
+
+    @torch.no_grad()
+    def forward(self, x, sigma, uncond, cond, cond_scale, denoise_mask, model_options={}, seed=None):
+        return self.inner_model(x, sigma, cond=cond, uncond=uncond, cond_scale=cond_scale, model_options=model_options, seed=seed)
+
 def get_blending_schedule(indices: list[int], blending_schedule: str, **kwargs):
     """
     Return a blending schedule for the given list of step indices and the named
@@ -80,6 +135,13 @@ class IterativeMixingSampler(ABC):
         # to the sigmas (noise schedule).
         z_prime = generate_noised_latents(x, sigmas, normalize=normalize_on_mean)
 
+        # If there is a denoising mask, mask the z_primes so that they are zero outside
+        # of the masked area. This ensures that we are never mixing anything into that part
+        # of the latent image.
+        if extra_args and extra_args['denoise_mask'] is not None:
+            denoise_mask = extra_args['denoise_mask']
+            z_prime = z_prime * denoise_mask
+
         steps = len(sigmas) - 1
         start_blending_at_step = 0 if start_blending_at_pct is None else int(start_blending_at_pct * steps)
         stop_blending_at_step = steps if stop_blending_at_pct is None else int(stop_blending_at_pct * steps)
@@ -123,23 +185,37 @@ class IterativeMixingEulerSamplerImpl(IterativeMixingSampler):
     def sample(self, model, x, sigmas, z_prime, c1, blend, extra_args=None, callback=None,
                disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.,
                *args, **kwargs):
+        # Graft the model onto our custom object that can track things.
+        our_model = ModularKSamplerX0Inpaint(model)
+        denoise_mask = extra_args.get('denoise_mask')
+
         s_in = x.new_ones([x.shape[0]])
         for i in trange(len(sigmas) - 1, disable=disable):
             gamma = min(s_churn / (len(sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigmas[i] <= s_tmax else 0.
             sigma_hat = sigmas[i] * (gamma + 1)
+
+            # Prepare x for diffusion with the denoise_mask.
+            # This applies the denoise mask to x.
+            masked_x, masked_zp = our_model.before(x, z_prime[i], sigmas[i], denoise_mask)
+
             if gamma > 0:
                 eps = torch.randn_like(x) * s_noise
-                x = x + eps * (sigma_hat ** 2 - sigmas[i] ** 2) ** 0.5
-            denoised = model(x, sigma_hat * s_in, **extra_args)
+                masked_x = masked_x + eps * (sigma_hat ** 2 - sigmas[i] ** 2) ** 0.5
+            
+            denoised = our_model(masked_x, sigma_hat * s_in, **extra_args)
             d = comfy.k_diffusion.sampling.to_d(x, sigma_hat, denoised)
             if callback is not None:
                 callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigma_hat, 'denoised': denoised})
             dt = sigmas[i + 1] - sigma_hat
+
             # Euler method
-            x = x + d * dt
+            x = masked_x + d * dt
 
             # Mix x with z_prime being sure to give z_prime[i] a batch dimension.
-            x = blend(z_prime[i].unsqueeze(0), x, c1[i])
+            x = blend(masked_zp.unsqueeze(0), x, c1[i])
+
+            # Reapply the denoise mask now that we are done.
+            x = our_model.after(x, denoise_mask)
 
         return x
     
@@ -168,6 +244,57 @@ def mask_to_latent(mask: torch.Tensor) -> torch.Tensor:
 
     return latent
 
+@torch.no_grad()
+def reshape_denoise_mask(denoise_mask: torch.Tensor):
+    "Reshape a denoise_mask into the correct shape for use with the model."
+
+    if denoise_mask.dim() == 3:
+        if denoise_mask.shape[2] == 1:
+            # Convert the singleton mask dimension into
+            # a 4-wide dimension by repeating the channel magnitudes 4 times.
+            denoise_mask = denoise_mask.unsqueeze(3) 
+            denoise_mask = denoise_mask.repeat(1, 1, 4, 1)
+            denoise_mask = denoise_mask.permute(3, 2, 0, 1).\
+                reshape(1, 4, denoise_mask.shape[0], denoise_mask.shape[1])
+        else:
+            raise ValueError("denoise mask has 3 dimensions but shape[2] != 1")
+    elif denoise_mask.dim() != 4:
+        raise ValueError(f"denoise_mask has invalid shape {denoise_mask.shape}")
+
+    return denoise_mask
+
+@torch.no_grad()
+def merge_denoise_masks(denoise_mask, extra_mask):
+    "Reshape a denoise mask to make it easier to work with our Perlin masks that have a funny shape"
+
+    # If the extra_mask was provided, reshape it.
+    extra_mask = reshape_denoise_mask(extra_mask) if extra_mask is not None else None
+
+    # If there is no default denoise_mask, but there is an extra_mask, then
+    # reshape it and return it. No merging required.
+    if denoise_mask is None:
+        if extra_mask is not None:
+            return extra_mask
+        else:
+            return None
+    else:
+        if extra_mask is not None:
+            # Multiply the masks element-wise along just one of the four
+            # channels (all channels are the same anyway).
+            combined_mask = denoise_mask[:, 0, :, :] * extra_mask[:, 0, :, :]
+
+            # Clamp the values to be between 0.0 and 1.0
+            combined_mask_clamped = torch.clamp(combined_mask, 0.0, 1.0)
+
+            # If needed, expand the result back to [B, C, H, W]
+            combined_mask_expanded = combined_mask_clamped.unsqueeze(1).expand_as(denoise_mask)
+            return combined_mask_expanded
+        else:
+            # Otherwise, just return the denoise_mask by itself.
+            return denoise_mask
+
+    
+
 class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
     """
     Implements Algorithm 2 (Euler steps) from Karras et al. (2022)
@@ -179,24 +306,33 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
     _argname = "euler_perlin"
 
     @torch.no_grad()
-    def get_masks(self, mode: str, loop_count: int, C: int, W: int, H: int, device, seed: int, scale: float):
+    def normalized_noise_batch(self, x, noise, dimensions=[0, 1, 2, 3]):
+        # Now match the noise by channel based on the statistics of x.
+        x_means = x.mean(dim=dimensions, keepdim=True)
+        x_stds = x.std(dim=dimensions, keepdim=True)
+        latents_means = noise.mean(dim=dimensions, keepdim=True)
+        latents_stds  = noise.std(dim=dimensions, keepdim=True)
+
+        normalized_latents = (noise - latents_means) / (latents_stds + 0.00001)
+        normalized_latents = normalized_latents * x_stds + x_means
+
+        return normalized_latents
+
+    @torch.no_grad()
+    def get_masks(self, mode: str, loop_count: int, C: int, W: int, H: int, x: torch.Tensor, seed: int, scale: float):
         # In direct mode, we generate Perlin latents to merge.
         if mode == "latents":
-            # Generate C x loop_count greyscale perlin masks and then permute and rearrange
-            # this into a batch of loop_count C channel latents.
-            # noise.perlin_masks returns [B*C, H, W, 1]
-            latentsx4 = perlin_masks(loop_count * C, W, H, device=device,
-                                           seed=seed, scale=scale)
+            # Generate a batch of grayscale perlin noise and rearrange the tensor
+            # to have the same dimension structure as Comfy latents.
+            latents = perlin_masks(loop_count, W, H, device=x.device,
+                                   seed=seed, scale=scale).view(loop_count, 1, H, W).\
+                                   repeat_interleave(4, dim=1)
 
-            # But we need [B, C, H, W], which we can accomplish with view()
-            latents = latentsx4.view(loop_count, 4, H, W)
             return latents
-        elif mode == "masks":
-            return perlin_masks(loop_count, W, H, device=device,
+        elif mode == "masks" or mode == "matched_noise":
+            masks = perlin_masks(loop_count, W, H, device=x.device,
                                    seed=seed, scale=scale)
-        elif mode == "matched_noise":
-            # XXX: Not the best.
-            return None
+            return masks
         else:
             raise ValueError(f"Invalid mode {mode}; expecting 'latents' or 'masks'")
 
@@ -204,15 +340,22 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
     def sample(self, model, x, sigmas, z_prime, c1, blend, extra_args=None, callback=None,
                disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.,
                seed: int=None, perlin_mode="latents", perlin_strength=0.75, perlin_scale=10.,
-               mixing_masks=None,
                *args, **kwargs):
         if len(x.shape) != 4:
             raise ValueError("latent x must be 4D")
         
         [B, C, H, W] = x.shape
 
+        # Extreme hackery: We use our own monkey-patched model object derived from
+        # the KSamplerX0Inpaint class so that we can do things differently w.r.t masking.
+        our_model = ModularKSamplerX0Inpaint(model)
+
+        # denoise_mask is in extra_args and it has the typical shape of a latent image
+        # including 4 channels (not one, as you might expect):
+        # denoise_mask=torch.Size([1, 4, 128, 128])
+
         if B != 1:
-            raise ValueError("this sampler cannot deal with batches of more than 1 latent; sorry")
+            raise ValueError("this sampler cannot deal with batches of more than 1 latent yet; sorry")
 
         s_in = x.new_ones([x.shape[0]])
         loop_count = len(sigmas) - 1
@@ -222,54 +365,76 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
         z_prime_mean = z_prime.mean(dim=(1, 2, 3))
 
         @torch.no_grad()
-        def denoise_step(inner_x, inner_i, inner_s_in, denoise_mask=None):
+        def denoise_step(inner_x, inner_i, inner_s_in, extra_denoise_mask=None):
             "Turn one crank of Euler against an arbitrary latent or partial latent represented by inner_x"
             gamma = min(s_churn / (len(sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigmas[inner_i] <= s_tmax else 0.
             sigma_hat = sigmas[inner_i] * (gamma + 1)
             if gamma > 0:
                 eps = torch.randn_like(inner_x) * s_noise
                 inner_x = inner_x + eps * (sigma_hat ** 2 - sigmas[inner_i] ** 2) ** 0.5
-            denoised = model(inner_x, sigma_hat * inner_s_in, **extra_args)
+            denoised = our_model(inner_x, sigma_hat * inner_s_in, **extra_args)
             d = comfy.k_diffusion.sampling.to_d(inner_x, sigma_hat, denoised)
             dt = sigmas[inner_i + 1] - sigma_hat
+
             return inner_x + d * dt, sigma_hat, denoised
 
-        if mixing_masks is not None:
-            perlin_tensors = mixing_masks
-        else:
-            # Generate a batch of perlin noise. Depending on the perlin_mode,
-            # this function either gives us a batch of perlin masks or a batch
-            # of perlin latents that we will apply below.        
-            perlin_tensors = self.get_masks(perlin_mode, loop_count, C, W, H, x.device,
-                                            seed=seed, scale=perlin_scale)
+        # Generate a batch of perlin noise. Depending on the perlin_mode,
+        # this function either gives us a batch of perlin masks or a batch
+        # of perlin latents that we will apply below.        
+        perlin_tensors = self.get_masks(perlin_mode, loop_count, C, W, H, x,
+                                        seed=seed, scale=perlin_scale)
 
         # Create a blending schedule for the perlin noise that is scaled
         # via the perlin_strength parameter. c1_perlin will range between
-        # c1_perlin and 1.0.
+        # perlin_strength and 1.0.
         c1_perlin = 1.0 + perlin_strength * (c1 - 1.0)
 
         for i in trange(loop_count, disable=disable):
-            x, sigma_hat, denoised = denoise_step(x, i, s_in)
+            # Save any existing denoise mask and fetch the masked versions of x and z_prime
+            # based on that denoise mask.
+            denoise_mask = extra_args.get("denoise_mask")
+            masked_x, masked_zp = our_model.before(x, z_prime[i], sigmas[i], denoise_mask)
+            
+            # Do a single denoise step of the (potentially masked) latent.
+            x, sigma_hat, denoised = denoise_step(masked_x, i, s_in)
+
+            # Blend x with the z_prime for this step (masked if needed).
+            x = blend(masked_zp.unsqueeze(0), x, c1[i])
+            
+            # Do an additional step of denoising while applying a perlin mask if desired.
+            if perlin_mode == "latents":
+                # Instead of being greyscale, the latents option fills all four channels
+                # for a remarkably different effect.
+                perlin_noise = perlin_tensors[i].unsqueeze(0)
+
+                # Mix in constant perlin noise at every step.
+                x = x * c1_perlin[i] + perlin_noise * (1. - c1_perlin[i]) * x
+            elif perlin_mode == "masks" and i < (loop_count - 1):
+                # Apply a denoise mask to x based on perlin noise. All our perlin noise samples
+                # are random, so it doesn't matter which perlin batch index we draw from.
+                # Then denoise x with the perlin mask applied and blend that masked denoise
+                # back with the original x.
+                perlin_denoise_mask = perlin_tensors[i].permute(2, 0, 1).unsqueeze(0)
+
+                # We denoise at the _next_ timestep. I'm not sure whether this is correct.
+                x_perlin, sigma_hat, denoised = denoise_step(x, i + 1, s_in)
+
+                # Take this denoised latent and blend it in with the previously denoised latent
+                # applying the perlin mask so that a declining share of the denoised part
+                # gets blended in as c1_perlin rises from 0.0 to 1.0 * perlin_strength as per its schedule.
+                x = x * (1. - perlin_denoise_mask) + (x * c1_perlin[i+1] + x_perlin * (1. - c1_perlin[i+1])) * perlin_denoise_mask
+            elif perlin_mode == "matched_noise":
+                # Blend in the perlin noise directly.
+                perlin_noise = perlin_tensors[i].permute(2, 0, 1).unsqueeze(0)
+                x = (x * c1_perlin[i] + perlin_noise * (1. - c1_perlin[i]))
+
+            # Apply the denoise mask after sampling. This restores the original latent
+            # to the area outside the denoising mask.
+            x = our_model.after(x, denoise_mask)
+
             if callback is not None:
                 callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigma_hat, 'denoised': denoised})
 
-            # Mix x with z_prime being sure to give z_prime[i] a batch dimension.
-            x = blend(z_prime[i].unsqueeze(0), x, c1[i])
-
-            # Now apply the perlin mask for this step and get the model to denoise again
-            # but without the blending of z_prime.
-            #x_2, sigma_hat, denoised = denoise_step(x, i, s_in, denoise_mask=perlin_masks[i])
-            
-            if perlin_mode == "latents":
-                x = perlin_tensors[i].unsqueeze(0) * perlin_strength + (1. - perlin_strength) * x
-            elif perlin_mode == "masks":
-                x, sigma_hat, denoised = denoise_step(x, i, s_in, denoise_mask=perlin_tensors[i] * (float(1.0) - c1_perlin[i]))
-            elif perlin_mode == "matched_noise":
-                matched_noise = torch.randn(C, H, W, device=z_prime_std.device) * z_prime_std[i] + z_prime_mean[i]
-                x = matched_noise * (1. - c1_perlin[i]) + x * c1_perlin[i]
-
-        if perlin_mode == "matched_noise":
-            x = (x - x.mean())
         return x
     
 class IterativeMixingLCMSamplerImpl(IterativeMixingSampler):
