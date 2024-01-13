@@ -9,6 +9,12 @@ In my first attempt at iterative mixing, I developed a few KSampler-type nodes t
 
 ## Updates
 
+## January 12th, 2024
+
+- The iterative mixing sampler code has been extensively reworked.
+- Masked latents are now handled correctly; however, iterative mixing is not a good fit for using the `VAEEncodeForInpaint` node because it erases the masked part, leaving nothing for the iterative mixer to blend with.
+- The `euler_perlin` sampling mode has been fixed up. Some things that were apparently working before were not actually implemented correctly. This is still an area of active investigation; consider any functionality in this mode to be highly experimental and subject to change.
+
 ## January 4th, 2024
 
 - Added new nodes that implement iterative mixing in combination with the `SamplerCustom` node from ComfyUI, which produces very clean output (no graininess). See the documentation below for details along with a new example workflow. This new approach includes the addition of a noise masking strategy that may improve results further.
