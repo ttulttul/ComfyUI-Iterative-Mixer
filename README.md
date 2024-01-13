@@ -64,6 +64,14 @@ the steps for denoising. Try setting the end step to 50% of the total step count
 mixing sampler to generate grainy output containing rich noise that can be passed into another iterative mixing
 sampler for refinement.
 
+Note that you must adjust the `start_blending_at` and `stop_blending_at` parameters on the sampler node
+to match the same proportion of total step count specified in the `IterativeMixingSchedulerAdvanced`, otherwise
+the blending schedule will configure itself to match the total steps in the range you specify in this node, rather than
+fitting the curve to the `steps` parameter. For instance, if you set `steps` to `40` and `start_at_step` to `0` and `end_at_step` to `20` (i.e. 50% of the way through the total steps), then you must adjust `stop_blending_at` to `80`
+so that the blending schedule will be stretched horizontally by a factor of two to account for the smaller length of
+the `sigmas` tensor being passed by the `IterativeMixingSchedulerAdvanced`. I know this is confusing and if a better way
+emerges, I will support it.
+
 ## MixingMaskGeneratorNode:
 
 This node generates a batch of perlin noise masks. In future, you will be able to feed these masks into the `IterativeMixingSampler` to precisely control latent mixing by applying a mask to the process at each step. For now, it offers a way to see for yourself what the perlin masks look like at various scale levels.
