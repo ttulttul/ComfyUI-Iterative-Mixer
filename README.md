@@ -57,6 +57,13 @@ This node feeds into a `SamplerCustom` node to implement iterative mixing sampli
 
 Use this node in combination with the `IterativeMixingSampler` described above. This node generates a set of sigmas to feed into the mixing sampler. It requires a model input to fetch the sigmas-related parameters from the model. The options on this node should be self-explanatory.
 
+### IterativeMixingSchedulerAdvanced:
+
+This is the same as the `IterativeMixingScheduler` but adds a start and end step so that you can control
+the steps for denoising. Try setting the end step to 50% of the total step count, which will cause the iterative
+mixing sampler to generate grainy output containing rich noise that can be passed into another iterative mixing
+sampler for refinement.
+
 ## MixingMaskGeneratorNode:
 
 This node generates a batch of perlin noise masks. In future, you will be able to feed these masks into the `IterativeMixingSampler` to precisely control latent mixing by applying a mask to the process at each step. For now, it offers a way to see for yourself what the perlin masks look like at various scale levels.
