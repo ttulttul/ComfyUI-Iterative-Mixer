@@ -1,6 +1,6 @@
 {
   "last_node_id": 555,
-  "last_link_id": 1184,
+  "last_link_id": 1185,
   "nodes": [
     {
       "id": 205,
@@ -419,10 +419,10 @@
         1122.7364465124924,
         3863.9860034338412
       ],
-      "size": {
-        "0": 355.20001220703125,
-        "1": 442
-      },
+      "size": [
+        355.20001220703125,
+        442.00008392333984
+      ],
       "flags": {},
       "order": 94,
       "mode": 0,
@@ -436,7 +436,7 @@
         {
           "name": "positive",
           "type": "CONDITIONING",
-          "link": null,
+          "link": 1185,
           "slot_index": 1
         },
         {
@@ -832,82 +832,6 @@
       ],
       "properties": {
         "Node name for S&R": "PreviewImage"
-      }
-    },
-    {
-      "id": 472,
-      "type": "FromBasicPipe_v2",
-      "pos": [
-        -541.4767010659689,
-        3071.797707787241
-      ],
-      "size": {
-        "0": 267,
-        "1": 126
-      },
-      "flags": {},
-      "order": 64,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "basic_pipe",
-          "type": "BASIC_PIPE",
-          "link": 1019
-        }
-      ],
-      "outputs": [
-        {
-          "name": "basic_pipe",
-          "type": "BASIC_PIPE",
-          "links": null,
-          "shape": 3
-        },
-        {
-          "name": "model",
-          "type": "MODEL",
-          "links": [
-            1145
-          ],
-          "shape": 3,
-          "slot_index": 1
-        },
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "links": null,
-          "shape": 3
-        },
-        {
-          "name": "vae",
-          "type": "VAE",
-          "links": [
-            1021,
-            1022
-          ],
-          "shape": 3,
-          "slot_index": 3
-        },
-        {
-          "name": "positive",
-          "type": "CONDITIONING",
-          "links": [
-            1183
-          ],
-          "shape": 3,
-          "slot_index": 4
-        },
-        {
-          "name": "negative",
-          "type": "CONDITIONING",
-          "links": [
-            1038,
-            1040
-          ],
-          "shape": 3
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "FromBasicPipe_v2"
       }
     },
     {
@@ -4480,6 +4404,83 @@
       ],
       "color": "#432",
       "bgcolor": "#653"
+    },
+    {
+      "id": 472,
+      "type": "FromBasicPipe_v2",
+      "pos": [
+        -541.4767010659689,
+        3071.797707787241
+      ],
+      "size": {
+        "0": 267,
+        "1": 126
+      },
+      "flags": {},
+      "order": 64,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "basic_pipe",
+          "type": "BASIC_PIPE",
+          "link": 1019
+        }
+      ],
+      "outputs": [
+        {
+          "name": "basic_pipe",
+          "type": "BASIC_PIPE",
+          "links": null,
+          "shape": 3
+        },
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            1145
+          ],
+          "shape": 3,
+          "slot_index": 1
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "links": null,
+          "shape": 3
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "links": [
+            1021,
+            1022
+          ],
+          "shape": 3,
+          "slot_index": 3
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "links": [
+            1183,
+            1185
+          ],
+          "shape": 3,
+          "slot_index": 4
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "links": [
+            1038,
+            1040
+          ],
+          "shape": 3
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "FromBasicPipe_v2"
+      }
     }
   ],
   "links": [
@@ -5666,6 +5667,14 @@
       186,
       0,
       "LATENT"
+    ],
+    [
+      1185,
+      472,
+      4,
+      465,
+      1,
+      "CONDITIONING"
     ]
   ],
   "groups": [
