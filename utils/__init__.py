@@ -2,7 +2,7 @@
 
 import inspect
 import logging
-from typing import Dict
+from typing import Dict, List, Tuple
 import torch
 
 def _trace(msg):
@@ -60,7 +60,9 @@ def generate_noised_latents(x, sigmas, normalize=False):
 
     # Unscientifically normalize the batch based on the mean of the first
     # latent in the batch (i.e. the original latent image).
+    # XXX: I'm going to deprecate this because it's not doing anything useful.
     if normalize:
+        logging.warning("the normalize option is being deprecated")
         source_mean = noised_latents[0].mean()
         noised_latents = (noised_latents - source_mean)
 
@@ -92,3 +94,26 @@ def slerp(low: torch.Tensor, high: torch.Tensor, val: float):
     so = torch.sin(omega)
     res = (torch.sin((1.0-val)*omega)/so).unsqueeze(1)*low + (torch.sin(val*omega)/so).unsqueeze(1) * high
     return res.reshape(dims)
+
+@torch.no_grad()
+def geometric_ranges(start: int, end: int, max_start: int=None) -> List[Tuple]:
+    """
+    Generates a list of tuples demarcating the start and end point of a range,
+    with the start value in each tuple rising by 50% each time. This function
+    is useful for generating a set of step ranges for implementing rewind
+    sampling.
+    """
+    ranges = []
+    ranges.append((start, end))
+
+    if max_start is None:
+        max_start = end - 1
+    
+    while True:
+        new_start = start + int((end - start) * 0.5)
+        if new_start >= end or new_start <= start or new_start > max_start:
+            break
+        ranges.append((new_start, end))
+        start = new_start
+    
+    return ranges

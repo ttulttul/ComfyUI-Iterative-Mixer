@@ -889,7 +889,8 @@ class IterativeMixingSamplerNode:
                     "blend_max": ("FLOAT", {"default": 1.0, "step": 0.01}),
                     "perlin_mode": (s.PERLIN_MODES, {"default": "masks"}),
                     "perlin_strength": ("FLOAT", {"default": 0.75, "step": 0.001}),
-                    "perlin_scale": ("FLOAT", {"default": 10., "min": 0.1, "max": 400.0})
+                    "perlin_scale": ("FLOAT", {"default": 10., "min": 0.1, "max": 400.0}),
+                    "rewind": ("BOOLEAN", {"default": False})
         }}
     RETURN_TYPES = ("SAMPLER",)
     CATEGORY = "sampling/custom_sampling/samplers"
@@ -909,7 +910,7 @@ class IterativeMixingSamplerNode:
                     blending_schedule, blending_function, normalize_on_mean,
                     start_blending_at_pct, stop_blending_at_pct,
                     clamp_blending_at_pct, blend_min, blend_max,
-                    perlin_mode, perlin_strength, perlin_scale):
+                    perlin_mode, perlin_strength, perlin_scale, rewind):
         extras = {k: v for k, v in locals().items() if k != 'self'}
 
         # We cannot have an extra arg called "model" as this will conflict with

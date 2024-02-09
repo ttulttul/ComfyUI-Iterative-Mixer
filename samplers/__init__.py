@@ -1,4 +1,5 @@
 from abc import ABC
+import logging
 from typing import Optional
 import torch
 from tqdm.auto import trange
@@ -9,7 +10,7 @@ import comfy.utils
 import comfy.samplers
 import comfy.k_diffusion.sampling
 
-from ..utils import generate_class_map, generate_noised_latents, slerp, _trace
+from ..utils import generate_class_map, generate_noised_latents, slerp, geometric_ranges, _trace
 from ..utils.noise import perlin_masks
 
 def _safe_get(theDict, key, theType):
@@ -106,6 +107,61 @@ class IterativeMixingSampler(ABC):
     """
 
     @torch.no_grad()
+    def run(self, model, x, sigmas, c1=None, blend=None, extra_args=None, callback=None,
+                 disable=None,
+                 start_sigma=0,
+                 end_sigma=None,
+                 s_churn=0., s_tmin=0., s_tmax=float('inf'),
+                 **kwargs):
+        """
+        Prepare the iterative mixing variables the derived classes will need.
+        Each sampler's implementation is in a sample function that is not implemented
+        in the base class.
+        """
+
+        # Set the final step to accommodate rewind.
+        # start_sigma:end_sigma specify the slice of the sigmas
+        # that we will use to generate the noised latents. So if we are
+        # only denoising part of the way, we will be given a start_sigma
+        # index value that is greater than 0.
+        end_sigma = end_sigma or len(sigmas)
+
+        if end_sigma > len(sigmas):
+            raise ValueError("end_sigma is out of range")
+        if start_sigma < 0:
+            raise ValueError("start_sigma is out of range")
+
+        # Generate a batch of progressively noised latents according
+        # to the sigmas (noise schedule). Note that if we are doing rewind,
+        # the sigmas may not start at step 0, so z_prime[0] won't necessarily be
+        # a fully noised latent.
+        _trace(f"len(sigmas)={len(sigmas)}, start_sigma:end_sigma={start_sigma}:{end_sigma}")
+        z_prime = generate_noised_latents(x, sigmas[start_sigma:end_sigma])
+
+        # Select the correct slice of the c1 blending schedule as well in case we
+        # are doing rewind (and not starting at step 0).
+        _trace(f"len(c1)={len(c1)}")
+        c1 = c1[start_sigma:end_sigma]
+
+        # If there is a denoising mask, mask the z_primes so that they are zero outside
+        # of the masked area. This ensures that we are never mixing anything into that part
+        # of the latent image.
+        if extra_args and extra_args['denoise_mask'] is not None:
+            denoise_mask = extra_args['denoise_mask']
+            z_prime = z_prime * denoise_mask
+
+        # Initialize x with the first z_prime (i.e. the noisiest z_prime).
+        x[0] = z_prime[0]
+
+        extra_args = {} if extra_args is None else extra_args
+        
+        return self.sample(model, x, sigmas[start_sigma:end_sigma],
+                           z_prime, c1, blend, extra_args=extra_args,
+                           callback=callback,
+                           disable=disable, s_churn=s_churn,
+                           s_tmin=s_tmin, s_tmax=s_tmax, **kwargs)
+    
+    @torch.no_grad()
     def __call__(self, model, x, sigmas, extra_args=None, callback=None,
                  disable=None, noise_sampler=None,
                  model_node=None,
@@ -118,6 +174,7 @@ class IterativeMixingSampler(ABC):
                  stop_blending_at_pct=None,
                  blend_min=0.0,
                  blend_max=1.0,
+                 rewind=False,
                  s_churn=0., s_tmin=0., s_tmax=float('inf'),
                  **kwargs):
         """
@@ -126,22 +183,17 @@ class IterativeMixingSampler(ABC):
         in the base class.
         """
 
+        # Deprecation warning:
+        if normalize_on_mean:
+            logging.warning("normalize_on_mean is deprecated (and does nothing)")
+
         # Fail if the batch size of x is greater than 1. We currently
         # cannot handle that situation.
         if x.shape[0] > 1:
             raise ValueError("cannot handle batches of latents currently; sorry")
 
-        # Generate a batch of progressively noised latents according
-        # to the sigmas (noise schedule).
-        z_prime = generate_noised_latents(x, sigmas, normalize=normalize_on_mean)
-
-        # If there is a denoising mask, mask the z_primes so that they are zero outside
-        # of the masked area. This ensures that we are never mixing anything into that part
-        # of the latent image.
-        if extra_args and extra_args['denoise_mask'] is not None:
-            denoise_mask = extra_args['denoise_mask']
-            z_prime = z_prime * denoise_mask
-
+        # Calculate some values we will need to generate the blending schedule
+        # and the noised latent sequence later.
         steps = len(sigmas) - 1
         start_blending_at_step = 0 if start_blending_at_pct is None else int(start_blending_at_pct * steps)
         stop_blending_at_step = steps if stop_blending_at_pct is None else int(stop_blending_at_pct * steps)
@@ -156,17 +208,31 @@ class IterativeMixingSampler(ABC):
                                 blend_min=blend_min,
                                 blend_max=blend_max)
 
-        # Get a latent blending function (slerp, additive, etc.)
+        # Get the right latent blending function (slerp, additive, etc.)
         blend = get_blending_function(blending_function)
 
-        # Initialize x with the first z_prime (i.e. the noisiest z_prime).
-        # Note, we are assuming that X has batch count 1.
-        x[0] = z_prime[0]
+        # If rewind mode is enabled, loop through a list of step ranges
+        # denoising, noising again, denoising, etc..
+        if rewind == True:
+            ranges = geometric_ranges(0, steps, max_start=int(steps * 0.8))
+        else:
+            ranges = [(0, steps)]
 
-        extra_args = {} if extra_args is None else extra_args
-        
-        return self.sample(model, x, sigmas, z_prime, c1, blend, extra_args=extra_args, callback=callback,
-                    disable=disable, s_churn=s_churn, s_tmin=s_tmin, s_tmax=s_tmax, **kwargs)
+        # Loop over the step ranges, sampling, rewinding, etc..
+        # If rewind is not enabled, the ranges just contain the usual
+        # range of steps called for.
+        for start_sigma, end_sigma in ranges:
+            _trace(f"rewind: {start_sigma}:{end_sigma}, len(c1)={len(c1)}")
+            x = self.run(model, x, sigmas, c1=c1,
+                                blend=blend, extra_args=extra_args, callback=callback,
+                                disable=disable,
+                                normalize_on_mean=None,
+                                start_sigma=start_sigma,
+                                end_sigma=end_sigma,
+                                s_churn=0., s_tmin=0., s_tmax=float('inf'),
+                                **kwargs)
+
+        return x
     
     @torch.no_grad()
     def sample(self, model, x, sigmas, z_prime, c1, blend, *args, **kwargs):
@@ -212,6 +278,7 @@ class IterativeMixingEulerSamplerImpl(IterativeMixingSampler):
             x = masked_x + d * dt
 
             # Mix x with z_prime being sure to give z_prime[i] a batch dimension.
+            _trace(f"i={i},masked_zp={masked_zp.shape}, x={x.shape}, len(c1)={len(c1)}")
             x = blend(masked_zp.unsqueeze(0), x, c1[i])
 
             # Reapply the denoise mask now that we are done.

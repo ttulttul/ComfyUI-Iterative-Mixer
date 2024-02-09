@@ -9,6 +9,11 @@ In my first attempt at iterative mixing, I developed a few KSampler-type nodes t
 
 ## Updates
 
+## February 9th, 2024
+
+- Added `rewind` option to the `IterativeMixingSampler` node. This highly experimental option causes the sampler to "rewind" sampling back to 50% of the steps, blending in a new set of noised latents as it samples forward again to the end. It then rewinds again half as far again (i.e. to 75% of the step count) and so on until the rewind step count exceeds 80% of the total steps (an arbitrary figure for which there is no configuration option). The idea behind rewind is to see whether it may give the model a chance to produce a better targeted output.
+- Deprecated the `normalize_on_mean` option in the `IterativeMixingSampler`; this option now does nothing but issue a warning to the console. If you want some normalization of your latents or images, please try my new node pack: https://github.com/ttulttul/ComfyUI-Tensor-Operations
+
 ## January 12th, 2024
 
 - The iterative mixing sampler code has been extensively reworked.
@@ -43,7 +48,7 @@ This node feeds into a `SamplerCustom` node to implement iterative mixing sampli
 - **alpha_1**: a parameter that controls the `blending_schedule` curve's steepness
 - **blending_schedule**: select between `cosine`, `logistic`, and `linear` blending curves for different results
 - **blending_function**: select between `addition`, `slerp`, and `norm_only` (see below for illustrations) to vary how the latents are blended during sampling
-- **normalize_on_mean**: normalize the input latent by subtracting out its mean value; this fixes a known issue with SD models that produce washed out images
+- **normalize_on_mean**: deprecated; this option does nothing
 - **start_blending_at_pct**: set the fraction of `steps` at which the blending curve will begin to start mixing in diffused latents; prior to this fraction of `steps`, only the noised `z_prime` latents will be sent to the model for denoising
 - **stop_blending_at_pct**: set the fraction of `steps` at which the blending curve will stop mixing in noised latents; after this point, the model will only be given denoised latents
 - **clamp_blending_at_pct**: without altering the blending curve, clamp the curve to 1.0 to halt blending of noised latents after this fraction of `steps`; this setting can be more effective than `stop_blending_at_pct` but has a similar effect
@@ -52,6 +57,7 @@ This node feeds into a `SamplerCustom` node to implement iterative mixing sampli
 - **perlin_mode**: used with the `euler_perlin` sampler option above, this selects between different perlin noise blending modes; if I have time, I'll write some documentation to describe precisely what these modes do
 - **perlin_strength**: a metric that controls the amount of perlin noise operations that take place during sampling
 - **perlin_scale**: this controls the blobby-ness of the perlin noise; values near 1.0 are close to pure noise where as values close to 100.0 result in huge blobs taking up nearly the entire area
+- **rewind**: (very **experimental**) this causes the sampler to renoise and rewind to 50% of the steps and run forward again, then go back to 75%, etc.. to re-target the model
 
 ### IterativeMixingScheduler:
 
