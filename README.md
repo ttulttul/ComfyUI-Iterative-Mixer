@@ -42,7 +42,7 @@ This node feeds into a `SamplerCustom` node to implement iterative mixing sampli
 - **sampler**: select a sampling method such as `euler`
 - **alpha_1**: a parameter that controls the `blending_schedule` curve's steepness
 - **blending_schedule**: select between `cosine`, `logistic`, and `linear` blending curves for different results
-- **blending_function**: select between `addition`, `slerp`, and `norm_only` to slightly vary how the latents are blended during sampling
+- **blending_function**: select between `addition`, `slerp`, and `norm_only` (see below for illustrations) to vary how the latents are blended during sampling
 - **normalize_on_mean**: normalize the input latent by subtracting out its mean value; this fixes a known issue with SD models that produce washed out images
 - **start_blending_at_pct**: set the fraction of `steps` at which the blending curve will begin to start mixing in diffused latents; prior to this fraction of `steps`, only the noised `z_prime` latents will be sent to the model for denoising
 - **stop_blending_at_pct**: set the fraction of `steps` at which the blending curve will stop mixing in noised latents; after this point, the model will only be given denoised latents
@@ -213,3 +213,17 @@ Here is what various values of $`alpha_1`$ yield in the cosine blending schedule
 ![The alpha_1 blending schedule](images/alpha_1_cosine_schedule.png)
 
 **Note**: I provide a `linear` blending option you can try to achieve a different result. There is no inherent reason why the blending schedule should be a cosine exponential. I think the paper's authors just thought it would be a good idea and perhaps their various PhD's in mathematics give them that liberty.
+
+## What do the different blending functions do?
+
+The **blending_function** lets you select between `addition`, `slerp`, and `norm_only` to vary how the latents are blended during sampling. To provide a sense of what these different blending options actually do, here are some illustrations:
+
+### addition
+![The addition blending function](images/blending-addition.png)
+
+### slerp
+![The slerp blending function](images/blending-slerp.png)
+
+### norm_only
+![The norm_only blending function](images/blending-norm_only.png)
+
