@@ -236,7 +236,7 @@ class IterativeMixingSampler(ABC):
                                 disable=disable,
                                 normalize_on_mean=None,
                                 start_sigma=start_sigma,
-                                end_sigma=end_sigma,
+                                end_sigma=end_sigma + 1,
                                 s_churn=0., s_tmin=0., s_tmax=float('inf'),
                                 **kwargs)
 
