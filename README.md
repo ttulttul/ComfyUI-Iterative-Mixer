@@ -57,7 +57,9 @@ This node feeds into a `SamplerCustom` node to implement iterative mixing sampli
 - **perlin_mode**: used with the `euler_perlin` sampler option above, this selects between different perlin noise blending modes; if I have time, I'll write some documentation to describe precisely what these modes do
 - **perlin_strength**: a metric that controls the amount of perlin noise operations that take place during sampling
 - **perlin_scale**: this controls the blobby-ness of the perlin noise; values near 1.0 are close to pure noise where as values close to 100.0 result in huge blobs taking up nearly the entire area
-- **rewind**: (very **experimental**) this causes the sampler to renoise and rewind to 50% of the steps and run forward again, then go back to 75%, etc.. to re-target the model
+- **rewind**: (very **experimental**) this causes the sampler to renoise and rewind to `rewind_min`% of the steps and run forward again, rewinding again and again but each time going back half as far; see the note below for details of the algorithm
+- **rewind_min**: each rewind cycle, go back to this fraction of `steps`
+- **rewind_max**: each rewind cycle, stop rewinding when the algorithm would produce a starting step count above this fraction of `steps`
 
 ### IterativeMixingScheduler:
 
@@ -233,3 +235,24 @@ The **blending_function** lets you select between `addition`, `slerp`, and `norm
 ### norm_only
 ![The norm_only blending function](images/blending-norm_only.png)
 
+## What does `rewind` do?
+
+Iterative mixing often produces results that are a bit blurry or lacking in detail. By rewinding back a bit and doing it again, we can produce more details. The `rewind` setting tells the sampler to follow this algorithm:
+
+1. Generate noised latents based on the input latent for the full step range (0 to `steps`).
+
+2. De-noise from 0 to `steps`, mixing in the noised latents at each step as described above.
+
+3. When finished, go back to `steps` * `rewind_min`, generating a fresh set of noised latents for that interval of steps.
+
+4. De-noise from `steps` * `rewind_min` to `steps`, mixing in the noised latents as usual.
+
+5. Repeat steps 3 and 4 except each time, rewind half as far as last time and repeat this loop until the procedure would result in rewinding beyond `rewind_max` steps.
+
+For example, if `steps` = 100, `rewind_min` = 0.5, and `rewind_max` = 0.8, then the rewind process would de-noise the following intervals:
+
+1. From 0 to 100
+2. From 50 to 100
+3. From 75 to 100
+
+Step 4 would not be reached because half of the interval from 75 to 100 is greater than 80, which would exceed `rewind_max`.

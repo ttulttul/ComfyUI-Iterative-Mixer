@@ -175,6 +175,8 @@ class IterativeMixingSampler(ABC):
                  blend_min=0.0,
                  blend_max=1.0,
                  rewind=False,
+                 rewind_min=0.0,
+                 rewind_max=0.999,
                  s_churn=0., s_tmin=0., s_tmax=float('inf'),
                  **kwargs):
         """
@@ -214,7 +216,13 @@ class IterativeMixingSampler(ABC):
         # If rewind mode is enabled, loop through a list of step ranges
         # denoising, noising again, denoising, etc..
         if rewind == True:
-            ranges = geometric_ranges(0, steps, max_start=int(steps * 0.8))
+            if rewind_min >= rewind_max:
+                raise ValueError("rewind_min must be less than rewind_max")
+            elif rewind_max > 1.0 or rewind_min > 1.0:
+                raise ValueError("rewind_max and rewind_min cannot exceed 1.0")
+            elif rewind_min < 0.0 or rewind_max < 0.0:
+                raise ValueError("rewind_min and rewind_min cannot be less than 0.0")
+            ranges = geometric_ranges(int(steps * rewind_min), steps, max_start=int(steps * rewind_max))
         else:
             ranges = [(0, steps)]
 
