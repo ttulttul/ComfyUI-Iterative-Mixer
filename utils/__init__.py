@@ -96,7 +96,7 @@ def slerp(low: torch.Tensor, high: torch.Tensor, val: float):
     return res.reshape(dims)
 
 @torch.no_grad()
-def geometric_ranges(start: int, end: int, max_start: int=None) -> List[Tuple]:
+def geometric_ranges(start: int, end: int, rewind: float=0.5, max_start: int=None) -> List[Tuple]:
     """
     Generates a list of tuples demarcating the start and end point of a range,
     with the start value in each tuple rising by 50% each time. This function
@@ -110,7 +110,7 @@ def geometric_ranges(start: int, end: int, max_start: int=None) -> List[Tuple]:
         max_start = end - 1
     
     while True:
-        new_start = start + int((end - start) * 0.5)
+        new_start = start + int((end - start) * rewind)
         if new_start >= end or new_start <= start or new_start > max_start:
             break
         ranges.append((new_start, end))

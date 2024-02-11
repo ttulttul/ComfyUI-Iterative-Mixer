@@ -222,7 +222,7 @@ class IterativeMixingSampler(ABC):
                 raise ValueError("rewind_max and rewind_min cannot exceed 1.0")
             elif rewind_min < 0.0 or rewind_max < 0.0:
                 raise ValueError("rewind_min and rewind_min cannot be less than 0.0")
-            ranges = geometric_ranges(int(steps * rewind_min), steps, max_start=int(steps * rewind_max))
+            ranges = geometric_ranges(0, steps, rewind_min, max_start=int(steps * rewind_max))
         else:
             ranges = [(0, steps)]
 
