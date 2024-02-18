@@ -117,3 +117,27 @@ def geometric_ranges(start: int, end: int, rewind: float=0.5, max_start: int=Non
         start = new_start
     
     return ranges
+
+@torch.no_grad()
+def match_normalize(target_tensor, source_tensor, dimensions=4):
+    "Adjust target_tensor based on source_tensor's mean and stddev"   
+    if len(target_tensor.shape) != dimensions:
+        raise ValueError("source_latent must have four dimensions")
+    if len(source_tensor.shape) != dimensions:
+        raise ValueError("target_latent must have four dimensions")
+
+    # Put everything on the same device
+    device = target_tensor.device
+
+    # Calculate the mean and std of target tensor
+    tgt_mean = target_tensor.mean(dim=[2, 3], keepdim=True).to(device)
+    tgt_std = target_tensor.std(dim=[2, 3], keepdim=True).to(device)
+    
+    # Calculate the mean and std of source tensor
+    src_mean = source_tensor.mean(dim=[2, 3], keepdim=True).to(device)
+    src_std = source_tensor.std(dim=[2, 3], keepdim=True).to(device)
+    
+    # Normalize target tensor to have mean=0 and std=1, then rescale
+    normalized_tensor = (target_tensor.clone() - tgt_mean) / tgt_std * src_std + src_mean
+    
+    return normalized_tensor

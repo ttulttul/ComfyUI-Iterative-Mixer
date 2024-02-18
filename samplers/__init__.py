@@ -10,7 +10,7 @@ import comfy.utils
 import comfy.samplers
 import comfy.k_diffusion.sampling
 
-from ..utils import generate_class_map, generate_noised_latents, slerp, geometric_ranges, _trace
+from ..utils import generate_class_map, generate_noised_latents, slerp, geometric_ranges, match_normalize, _trace
 from ..utils.noise import perlin_masks
 
 def _safe_get(theDict, key, theType):
@@ -185,14 +185,16 @@ class IterativeMixingSampler(ABC):
         in the base class.
         """
 
-        # Deprecation warning:
-        if normalize_on_mean:
-            logging.warning("normalize_on_mean is deprecated (and does nothing)")
-
         # Fail if the batch size of x is greater than 1. We currently
         # cannot handle that situation.
         if x.shape[0] > 1:
             raise ValueError("cannot handle batches of latents currently; sorry")
+        
+        # Copy the source latent for normalization purposes.
+        if normalize_on_mean:
+            original_latent = x.clone()
+        else:
+            original_latent = None
 
         # Calculate some values we will need to generate the blending schedule
         # and the noised latent sequence later.
@@ -239,6 +241,9 @@ class IterativeMixingSampler(ABC):
                                 end_sigma=end_sigma + 1,
                                 s_churn=0., s_tmin=0., s_tmax=float('inf'),
                                 **kwargs)
+
+        if normalize_on_mean:
+            match_normalize(x, original_latent)
 
         return x
     
