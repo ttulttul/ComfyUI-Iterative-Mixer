@@ -243,7 +243,7 @@ class IterativeMixingSampler(ABC):
                                 **kwargs)
 
         if normalize_on_mean:
-            match_normalize(x, original_latent)
+            x = match_normalize(x, original_latent)
 
         return x
     
