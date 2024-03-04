@@ -36,8 +36,8 @@ class ModularKSamplerX0Inpaint(comfy.samplers.KSamplerX0Inpaint):
     the denoise mask so that we can do fancier things with masking separate
     from denoising.
     """
-    def __init__(self, model: comfy.samplers.KSamplerX0Inpaint):
-        super().__init__(model.inner_model)
+    def __init__(self, model: comfy.samplers.KSamplerX0Inpaint, sigmas):
+        super().__init__(model.inner_model, sigmas)
         self.latent_image = model.latent_image
         self.noise = model.noise
 
@@ -265,7 +265,7 @@ class IterativeMixingEulerSamplerImpl(IterativeMixingSampler):
                disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.,
                *args, **kwargs):
         # Graft the model onto our custom object that can track things.
-        our_model = ModularKSamplerX0Inpaint(model)
+        our_model = ModularKSamplerX0Inpaint(model, sigmas)
         denoise_mask = extra_args.get('denoise_mask')
 
         s_in = x.new_ones([x.shape[0]])
