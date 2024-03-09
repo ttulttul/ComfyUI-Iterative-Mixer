@@ -9,6 +9,12 @@ In my first attempt at iterative mixing, I developed a few KSampler-type nodes t
 
 ## Updates
 
+## March 9th, 2024
+
+- Added support for the new `Differential Diffusion` node added recently in ComfyUI main.
+- Please see the example workflow in `Differential Diffusion.png` to see how this can be used with iterative mixing.
+- Combining Differential Diffusion with the `rewind` feature can be especially powerful in inpainting workflows.
+
 ## February 9th, 2024
 
 - Added `rewind` option to the `IterativeMixingSampler` node. This highly experimental option causes the sampler to "rewind" sampling back to 50% of the steps, blending in a new set of noised latents as it samples forward again to the end. It then rewinds again half as far again (i.e. to 75% of the step count) and so on until the rewind step count exceeds 80% of the total steps (an arbitrary figure for which there is no configuration option). The idea behind rewind is to see whether it may give the model a chance to produce a better targeted output.

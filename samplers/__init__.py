@@ -1,6 +1,6 @@
 from abc import ABC
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 import torch
 from tqdm.auto import trange
 
@@ -36,10 +36,23 @@ class ModularKSamplerX0Inpaint(comfy.samplers.KSamplerX0Inpaint):
     the denoise mask so that we can do fancier things with masking separate
     from denoising.
     """
-    def __init__(self, model: comfy.samplers.KSamplerX0Inpaint, sigmas):
+    def __init__(self, model: comfy.samplers.KSamplerX0Inpaint, sigmas, model_options: dict):
         super().__init__(model.inner_model, sigmas)
         self.latent_image = model.latent_image
         self.noise = model.noise
+        self.model_options = model_options
+
+    @torch.no_grad()
+    def get_masks(self, sigma: float, denoise_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Return the denoise mask and the latent mask (which is its inverse).
+        """
+        
+        if "denoise_mask_function" in self.model_options:
+            denoise_mask = self.model_options["denoise_mask_function"](sigma, denoise_mask, extra_options={"model": self.inner_model, "sigmas": self.sigmas})
+        
+        latent_mask = 1. - denoise_mask
+        return (denoise_mask, latent_mask)
 
     @torch.no_grad()
     def before(self, x: torch.tensor, z_prime: torch.tensor, sigma: float, denoise_mask: Optional[torch.Tensor]) -> torch.tensor:
@@ -52,8 +65,9 @@ class ModularKSamplerX0Inpaint(comfy.samplers.KSamplerX0Inpaint):
             return x * denoise_mask + (self.latent_image + self.noise * sigma_reshaped) * latent_mask
 
         sigma = torch.tensor([sigma], device=x.device)
+
         if denoise_mask is not None:
-            latent_mask = 1. - denoise_mask
+            denoise_mask, latent_mask = self.get_masks(sigma, denoise_mask)
             sigma_reshaped = sigma.reshape([sigma.shape[0]] + [1] * (len(self.noise.shape) - 1))
 
             x = apply_mask(x, denoise_mask, latent_mask, sigma_reshaped)
@@ -63,14 +77,14 @@ class ModularKSamplerX0Inpaint(comfy.samplers.KSamplerX0Inpaint):
         return x, z_prime
 
     @torch.no_grad()
-    def after(self, denoised_x: torch.Tensor, denoise_mask: Optional[torch.Tensor]) -> torch.Tensor:
+    def after(self, denoised_x: torch.Tensor, sigma: float, denoise_mask: Optional[torch.Tensor]) -> torch.Tensor:
         """
         After the model is called, call this function to apply the latent mask
         again so that your denoising effectively applied only to the part that
         was masked.
         """
         if denoise_mask is not None:
-            latent_mask = 1. - denoise_mask
+            denoise_mask, latent_mask = self.get_masks(sigma, denoise_mask)
             denoised_x = denoised_x * denoise_mask + self.latent_image * latent_mask
         else:
             # nothing to do
@@ -119,6 +133,9 @@ class IterativeMixingSampler(ABC):
         in the base class.
         """
 
+        # Wrap the model object in our modular version that provides various helper functions.
+        our_model = ModularKSamplerX0Inpaint(model, sigmas, extra_args["model_options"])
+
         # Set the final step to accommodate rewind.
         # start_sigma:end_sigma specify the slice of the sigmas
         # that we will use to generate the noised latents. So if we are
@@ -148,8 +165,16 @@ class IterativeMixingSampler(ABC):
         # of the latent image.
         if extra_args and extra_args['denoise_mask'] is not None:
             denoise_mask = extra_args['denoise_mask']
-            z_prime = z_prime * denoise_mask
 
+            # XXX: We should make this more efficient with a parallel operation in torch
+            # but for now... we iterate through the sigmas and call the get_masks() function
+            # within the model object (which is our special wrapper model), which returns
+            # an appropriate mask at that sigma. In case of differential diffusion, the 
+            # denoise_mask can be different at each time step.
+            for idx, sigma in enumerate(sigmas[start_sigma:end_sigma]):
+                denoise_mask, _ = our_model.get_masks(sigma, denoise_mask)
+                z_prime[idx] = z_prime[idx] * denoise_mask
+            
         # Initialize x with the first z_prime (i.e. the noisiest z_prime).
         x[0] = z_prime[0]
 
@@ -265,7 +290,7 @@ class IterativeMixingEulerSamplerImpl(IterativeMixingSampler):
                disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.,
                *args, **kwargs):
         # Graft the model onto our custom object that can track things.
-        our_model = ModularKSamplerX0Inpaint(model, sigmas)
+        our_model = ModularKSamplerX0Inpaint(model, sigmas, extra_args["model_options"])
         denoise_mask = extra_args.get('denoise_mask')
 
         s_in = x.new_ones([x.shape[0]])
@@ -295,7 +320,7 @@ class IterativeMixingEulerSamplerImpl(IterativeMixingSampler):
             x = blend(masked_zp.unsqueeze(0), x, c1[i])
 
             # Reapply the denoise mask now that we are done.
-            x = our_model.after(x, denoise_mask)
+            x = our_model.after(x, sigmas[i], denoise_mask)
 
         return x
     
@@ -428,7 +453,7 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
 
         # Extreme hackery: We use our own monkey-patched model object derived from
         # the KSamplerX0Inpaint class so that we can do things differently w.r.t masking.
-        our_model = ModularKSamplerX0Inpaint(model)
+        our_model = ModularKSamplerX0Inpaint(model, sigmas, extra_args["model_options"])
 
         # denoise_mask is in extra_args and it has the typical shape of a latent image
         # including 4 channels (not one, as you might expect):
@@ -510,7 +535,7 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
 
             # Apply the denoise mask after sampling. This restores the original latent
             # to the area outside the denoising mask.
-            x = our_model.after(x, denoise_mask)
+            x = our_model.after(x, sigmas[i], denoise_mask)
 
             if callback is not None:
                 callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigma_hat, 'denoised': denoised})
@@ -558,6 +583,9 @@ class IterativeMixingDPM2MImpl(IterativeMixingSampler):
     def sample(self, model, x, sigmas, z_prime, c1, blend, extra_args=None, callback=None,
                         disable=None, *args, **kwargs):
         """DPM-Solver++(2M)."""
+        our_model = ModularKSamplerX0Inpaint(model, sigmas, extra_args["model_options"])
+        denoise_mask = extra_args.get('denoise_mask')
+
         extra_args = {} if extra_args is None else extra_args
         s_in = x.new_ones([x.shape[0]])
         sigma_fn = lambda t: t.neg().exp()
@@ -565,9 +593,11 @@ class IterativeMixingDPM2MImpl(IterativeMixingSampler):
         old_denoised = None
 
         for i in trange(len(sigmas) - 1, disable=disable):
-            denoised = model(x, sigmas[i] * s_in, **extra_args)
+            masked_x, masked_zp = our_model.before(x, z_prime[i], sigmas[i], denoise_mask)
+
+            denoised = model(masked_x, sigmas[i] * s_in, **extra_args)
             if callback is not None:
-                callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
+                callback({'x': masked_x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
             t, t_next = t_fn(sigmas[i]), t_fn(sigmas[i + 1])
             h = t_next - t
             if old_denoised is None or sigmas[i + 1] == 0:
@@ -579,9 +609,10 @@ class IterativeMixingDPM2MImpl(IterativeMixingSampler):
                 x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised_d
 
             # Run latent mixing. Is this the right spot?
-            x = blend(z_prime[i].unsqueeze(0), x, c1[i])
+            x = blend(masked_zp.unsqueeze(0), x, c1[i])
 
             old_denoised = denoised
+            x = our_model.after(x, sigmas[i], denoise_mask)
         return x
     
 class BlendingFunction(ABC):
