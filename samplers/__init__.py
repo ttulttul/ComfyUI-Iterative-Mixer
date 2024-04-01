@@ -43,10 +43,15 @@ class ModularKSamplerX0Inpaint(comfy.samplers.KSamplerX0Inpaint):
         self.model_options = model_options
 
     @torch.no_grad()
-    def get_masks(self, sigma: float, denoise_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_masks(self, sigma: torch.Tensor, denoise_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Return the denoise mask and the latent mask (which is its inverse).
         """
+
+        # XXX: A bit hacky: sigma must be a one-dimensional tensor or
+        # various things will fail such as DifferentialDiffusion.
+        if sigma.dim() == 0:
+            sigma = torch.tensor([sigma], device=denoise_mask.device)
         
         if "denoise_mask_function" in self.model_options:
             denoise_mask = self.model_options["denoise_mask_function"](sigma, denoise_mask, extra_options={"model": self.inner_model, "sigmas": self.sigmas})
@@ -55,7 +60,7 @@ class ModularKSamplerX0Inpaint(comfy.samplers.KSamplerX0Inpaint):
         return (denoise_mask, latent_mask)
 
     @torch.no_grad()
-    def before(self, x: torch.tensor, z_prime: torch.tensor, sigma: float, denoise_mask: Optional[torch.Tensor]) -> torch.tensor:
+    def before(self, x: torch.Tensor, z_prime: torch.Tensor, sigma: float, denoise_mask: Optional[torch.Tensor]) -> torch.Tensor:
         """
         Apply the denoise mask appropriately to the x and z_prime tensors.
         Call this method before running denoise steps in the iterative mixing sampler.
@@ -64,11 +69,11 @@ class ModularKSamplerX0Inpaint(comfy.samplers.KSamplerX0Inpaint):
         def apply_mask(x, denoise_mask, latent_mask, sigma_reshaped):
             return x * denoise_mask + (self.latent_image + self.noise * sigma_reshaped) * latent_mask
 
-        sigma = torch.tensor([sigma], device=x.device)
+        sigma_tensor = torch.tensor([sigma], device=x.device)
 
         if denoise_mask is not None:
-            denoise_mask, latent_mask = self.get_masks(sigma, denoise_mask)
-            sigma_reshaped = sigma.reshape([sigma.shape[0]] + [1] * (len(self.noise.shape) - 1))
+            denoise_mask, latent_mask = self.get_masks(sigma_tensor, denoise_mask)
+            sigma_reshaped = sigma_tensor.reshape([sigma_tensor.shape[0]] + [1] * (len(self.noise.shape) - 1))
 
             x = apply_mask(x, denoise_mask, latent_mask, sigma_reshaped)
             z_prime = apply_mask(z_prime.unsqueeze(0), denoise_mask, latent_mask, sigma_reshaped)
@@ -83,8 +88,11 @@ class ModularKSamplerX0Inpaint(comfy.samplers.KSamplerX0Inpaint):
         again so that your denoising effectively applied only to the part that
         was masked.
         """
+
+        sigma_tensor = torch.tensor([sigma], device=denoised_x.device)
+
         if denoise_mask is not None:
-            denoise_mask, latent_mask = self.get_masks(sigma, denoise_mask)
+            denoise_mask, latent_mask = self.get_masks(sigma_tensor, denoise_mask)
             denoised_x = denoised_x * denoise_mask + self.latent_image * latent_mask
         else:
             # nothing to do
