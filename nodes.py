@@ -987,13 +987,13 @@ class IterativeMixingSchedulerAdvanced:
         # Determine the sigmas based on the specified denoising strength.
         # This is mostly copied from comfy_extras/nodes_custom_sampler.py.
         sigmas = None
-        cs = comfy.samplers.calculate_sigmas_scheduler
+        cs = comfy.samplers.calculate_sigmas
 
         if denoise is None or denoise > 0.9999:
-            sigmas = cs(model.model, scheduler, steps).cpu()
+            sigmas = cs(model.model.model_sampling, scheduler, steps).cpu()
         else:
             new_steps = int(steps/denoise)
-            sigmas = cs(model.model, scheduler, new_steps).cpu()
+            sigmas = cs(model.model.model_sampling, scheduler, new_steps).cpu()
             sigmas = sigmas[-(steps + 1):]
 
         if end_at_step is not None and end_at_step < (len(sigmas) - 1):
