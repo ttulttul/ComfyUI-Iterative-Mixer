@@ -9,6 +9,10 @@ In my first attempt at iterative mixing, I developed a few KSampler-type nodes t
 
 ## Updates
 
+## June 13th, 2024
+
+- Made some small changes to make this node pack work with SD3.
+
 ## March 9th, 2024
 
 - Added support for the new `Differential Diffusion` node added recently in ComfyUI main.
