@@ -331,44 +331,20 @@ class IterativeMixingEulerSamplerImpl(IterativeMixingSampler):
             x = our_model.after(x, sigmas[i], denoise_mask)
 
         return x
-    
-def mask_to_latent(mask: torch.Tensor) -> torch.Tensor:
-    """
-    Masks have shape [B, H, W, 1] whereas latents have shape
-    [B, 4, H, W]. Let's convert a mask batch into a latent batch.
-    """
-
-    # Make a copy because we'll be changing this baby.
-    latent = mask.clone()
-
-    if len(latent.shape) < 3:
-        raise ValueError("expecting a mask tensor with at least 3 dimensions (H, W, C)")
-
-    # If the mask lacks a batch dimension, add a single batch dimension.
-    if len(latent.shape) == 3:
-        latent = latent.unsqueeze(0)
-
-    # Repeat the intensity channel across all the channels of the latent channel dim.
-    # This reshapes the mask to [B, H, W, 4]
-    latent = latent.repeat(1, 1, 1, 4)
-
-    # Transpose to match x2 shape: [B, 4, H, W]
-    latent = latent.permute(0, 3, 1, 2)  # Shape becomes [B, 4, H, W]
-
-    return latent
 
 @torch.no_grad()
-def reshape_denoise_mask(denoise_mask: torch.Tensor):
+def reshape_denoise_mask(denoise_mask: torch.Tensor, channel_count: int=4):
     "Reshape a denoise_mask into the correct shape for use with the model."
 
     if denoise_mask.dim() == 3:
         if denoise_mask.shape[2] == 1:
             # Convert the singleton mask dimension into
-            # a 4-wide dimension by repeating the channel magnitudes 4 times.
+            # a channel_count-wide dimension by repeating the channel
+            # magnitudes channel_count times.
             denoise_mask = denoise_mask.unsqueeze(3) 
-            denoise_mask = denoise_mask.repeat(1, 1, 4, 1)
+            denoise_mask = denoise_mask.repeat(1, 1, channel_count, 1)
             denoise_mask = denoise_mask.permute(3, 2, 0, 1).\
-                reshape(1, 4, denoise_mask.shape[0], denoise_mask.shape[1])
+                reshape(1, channel_count, denoise_mask.shape[0], denoise_mask.shape[1])
         else:
             raise ValueError("denoise mask has 3 dimensions but shape[2] != 1")
     elif denoise_mask.dim() != 4:
@@ -439,7 +415,7 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
             # to have the same dimension structure as Comfy latents.
             latents = perlin_masks(loop_count, W, H, device=x.device,
                                    seed=seed, scale=scale).view(loop_count, 1, H, W).\
-                                   repeat_interleave(4, dim=1)
+                                   repeat_interleave(C, dim=1)
 
             return latents
         elif mode == "masks" or mode == "matched_noise":
@@ -464,7 +440,7 @@ class IterativeMixingPerlinEulerSamplerImpl(IterativeMixingSampler):
         our_model = ModularKSamplerX0Inpaint(model, sigmas, extra_args["model_options"])
 
         # denoise_mask is in extra_args and it has the typical shape of a latent image
-        # including 4 channels (not one, as you might expect):
+        # including 4 (or 16?) channels (not one, as you might expect):
         # denoise_mask=torch.Size([1, 4, 128, 128])
 
         if B != 1:

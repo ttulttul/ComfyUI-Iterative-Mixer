@@ -43,13 +43,10 @@ def generate_noised_latents(x, sigmas, normalize=False):
     d = x.shape[0]
     num_sigmas = len(sigmas)
 
-    if d > 1:
-        raise ValueError("Iterative Mixing currently only works with single latent batches")
-
     # Expand x and sigmas to match each other in the first dimension
     # x_expanded shape will be:
     # [batch_size * num_sigmas, channels, height, width]
-    x_expanded = x.repeat(num_sigmas, 1, 1, 1)
+    x_expanded = x.repeat(d * num_sigmas, 1, 1, 1)
     sigmas_expanded = sigmas.repeat_interleave(d)
 
     # Create a noise tensor with the same shape as x_expanded
