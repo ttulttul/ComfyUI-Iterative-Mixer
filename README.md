@@ -9,6 +9,10 @@ In my first attempt at iterative mixing, I developed a few KSampler-type nodes t
 
 ## Updates
 
+## July 9th, 2024
+
+- Finally added the necessary hooks to add this node to the Comfy Registry.
+
 ## June 13th, 2024
 
 - Made some small changes to make this node pack work with SD3.
