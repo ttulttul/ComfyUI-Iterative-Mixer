@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-iterative-mixer"
 description = "Implements a novel sampling approach that progressively blends noised latents to better align with a source image."
-version = "0.7.1"
+version = "0.7.2"
 license = "LICENSE"
 dependencies = ["torch>=2.0.0", "torchvision>=0.15.0", "comfy>=0.1.0", "numpy>=1.21.0", "matplotlib>=3.5.0", "Pillow>=9.0.0", "tqdm>=4.62.0", "scipy>=1.7.0"]
 
